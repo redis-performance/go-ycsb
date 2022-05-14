@@ -1,8 +1,9 @@
 # .github/workflows/github-release-publish.yml
+name: Publish artifacts to github release
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 jobs:
   releases-matrix:
