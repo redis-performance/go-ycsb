@@ -88,7 +88,7 @@ Common configurations:
 |verbose|false|Output the execution query|
 |debug.pprof|":6060"|Go debug profile address|
 
-### MySQL
+### MySQL & TiDB
 
 |field|default value|description|
 |-|-|-|
@@ -97,6 +97,7 @@ Common configurations:
 |mysql.user|"root"|MySQL User|
 |mysql.password||MySQL Password|
 |mysql.db|"test"|MySQL Database|
+|tidb.cluster_index|true|Whether to use cluster index, for TiDB only|
 
 
 ### TiKV
@@ -107,7 +108,8 @@ Common configurations:
 |tikv.type|"raw"|TiKV mode, "raw", "txn", or "coprocessor"|
 |tikv.conncount|128|gRPC connection count|
 |tikv.batchsize|128|Request batch size|
-
+|tikv.async_commit|true|Enalbe async commit or not|
+|tikv.one_pc|true|Enable one phase or not|
 
 ### FoundationDB
 
