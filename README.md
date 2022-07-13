@@ -9,6 +9,28 @@ go-ycsb is a Go port of [YCSB](https://github.com/brianfrankcooper/YCSB). It ful
 
 ## Getting Started
 
+### Download
+
+https://github.com/filipecosta90/go-ycsb/releases/latest
+
+**Linux**
+```
+wget -c https://github.com/filipecosta90/go-ycsb/releases/latest/download/go-ycsb-linux-amd64.tar.gz -O - | tar -xz
+
+# give it a try
+./go-ycsb --help
+```
+
+**OSX**
+```
+wget -c https://github.com/filipecosta90/go-ycsb/releases/latest/download/go-ycsb-darwin-amd64.tar.gz -O - | tar -xz
+
+# give it a try
+./go-ycsb --help
+```
+
+### Building from source
+
 ```bash
 git clone https://github.com/pingcap/go-ycsb.git
 cd go-ycsb
@@ -25,7 +47,7 @@ Notice:
 
 ## Usage 
 
-Mostly, we can start from the offical document [Running-a-Workload](https://github.com/brianfrankcooper/YCSB/wiki/Running-a-Workload).
+Mostly, we can start from the official document [Running-a-Workload](https://github.com/brianfrankcooper/YCSB/wiki/Running-a-Workload).
 
 ### Shell
 
