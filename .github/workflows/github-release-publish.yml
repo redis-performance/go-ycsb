@@ -20,8 +20,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.goarch }}
-          project_path: "./bin/go-ycsb"
-          binary_name: "go-ycsb"
+          binary_name: "./bin/go-ycsb"
           sha256sum: true
-          build_command: "make"
           asset_name: go-ycsb-${{ matrix.goos }}-${{ matrix.goarch }}
+          build_command: "make"
