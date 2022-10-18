@@ -408,10 +408,7 @@ func (c *core) nextKeyNum(state *coreState) int64 {
 			keyNum = c.transactionInsertKeySequence.Last() - c.keyChooser.Next(r)
 		}
 	} else {
-		keyNum = math.MaxInt64
-		for keyNum > c.transactionInsertKeySequence.Last() {
-			keyNum = c.keyChooser.Next(r)
-		}
+		keyNum = c.keyChooser.Next(r)
 	}
 	return keyNum
 }
@@ -651,7 +648,7 @@ func (coreCreator) Create(p *properties.Properties) (ycsb.Workload, error) {
 	c.keySequence = generator.NewCounter(insertStart)
 	c.operationChooser = createOperationGenerator(p)
 	var keyrangeLowerBound int64 = insertStart
-	var keyrangeUpperBound int64 = insertStart+insertCount-1
+	var keyrangeUpperBound int64 = insertStart + insertCount - 1
 
 	c.transactionInsertKeySequence = generator.NewAcknowledgedCounter(c.recordCount)
 	switch requestDistrib {
