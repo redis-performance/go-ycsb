@@ -101,6 +101,13 @@ Available Commands:
 - etcd
 - DynamoDB
 
+## Output configuration
+
+|field|default value|description|
+|-|-|-|
+|measurementtype|"histogram"|The mechanism for recording measurements, one of `histogram`, `raw` or `csv`|
+|measurement.output_file|""|File to write output to, default writes to stdout|
+
 ## Database Configuration
 
 You can pass the database configurations through `-p field=value` in the command line directly.
@@ -123,6 +130,7 @@ Common configurations:
 |mysql.password||MySQL Password|
 |mysql.db|"test"|MySQL Database|
 |tidb.cluster_index|true|Whether to use cluster index, for TiDB only|
+|tidb.instances|""|Comma-seperated address list of tidb instances (eg: `tidb-0:4000,tidb-1:4000`)|
 
 
 ### TiKV
@@ -267,9 +275,10 @@ Common configurations:
 |redis.mode|single|"single" or "cluster"|
 |redis.network|tcp|"tcp" or "unix"|
 |redis.addr||Redis server address(es) in "host:port" form, can be semi-colon `;` separated in cluster mode|
+|redis.username||Redis server username|
 |redis.password||Redis server password|
 |redis.db|0|Redis server target db|
-|redis.max_redirects|8|The maximum number of retries before giving up (only for cluster mode)|
+|redis.max_redirects|0|The maximum number of retries before giving up (only for cluster mode)|
 |redis.read_only|false|Enables read-only commands on slave nodes (only for cluster mode)|
 |redis.route_by_latency|false|Allows routing read-only commands to the closest master or slave node (only for cluster mode)|
 |redis.route_randomly|false|Allows routing read-only commands to the random master or slave node (only for cluster mode)|
@@ -281,10 +290,11 @@ Common configurations:
 |redis.write_timeout|3s|Timeout for socket writes|
 |redis.pool_size|10|Maximum number of socket connections|
 |redis.min_idle_conns|0|Minimum number of idle connections|
+|redis.max_idle_conns|0|Maximum number of idle connections. If <= 0, connections are not closed due to a connection's idle time.|
 |redis.max_conn_age|0|Connection age at which client closes the connection|
 |redis.pool_timeout|4s|Amount of time client waits for connections are busy before returning an error|
 |redis.idle_timeout|5m|Amount of time after which client closes idle connections. Should be less than server timeout|
-|redis.idle_check_frequency|1m|Frequency of idle checks made by idle connections reaper|
+|redis.idle_check_frequency|1m|Frequency of idle checks made by idle connections reaper. Deprecated in favour of redis.max_idle_conns|
 |redis.tls_ca||Path to CA file|
 |redis.tls_cert||Path to cert file|
 |redis.tls_key||Path to key file|
@@ -322,6 +332,9 @@ Common configurations:
 |dynamodb.ensure.clean.table|true|On load mode ensure that the table is clean at the begining. In case of true and if the table previously exists it will be deleted and recreated|
 |dynamodb.endpoint|""|Used endpoint for connection. If empty will use the default loaded configs|
 |dynamodb.region|""|Used region for connection ( should match endpoint ). If empty will use the default loaded configs|
+|dynamodb.consistent.reads|false|Reads on DynamoDB provide an eventually consistent read by default. If your benchmark/use-case requires a strongly consistent read, set this option to true|
+|dynamodb.delete.after.run.stage|false|Detele the database table after the run stage|
+
 
 
 ## TODO

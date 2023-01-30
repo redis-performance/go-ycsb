@@ -441,7 +441,7 @@ func (c *core) doTransactionRead(ctx context.Context, db ycsb.DB, state *coreSta
 func (c *core) doTransactionReadModifyWrite(ctx context.Context, db ycsb.DB, state *coreState) error {
 	start := time.Now()
 	defer func() {
-		measurement.Measure("READ_MODIFY_WRITE", time.Now().Sub(start))
+		measurement.Measure("READ_MODIFY_WRITE", start, time.Now().Sub(start))
 	}()
 
 	r := state.r
@@ -702,4 +702,5 @@ func (coreCreator) Create(p *properties.Properties) (ycsb.Workload, error) {
 
 func init() {
 	ycsb.RegisterWorkloadCreator("core", coreCreator{})
+	ycsb.RegisterWorkloadCreator("site.ycsb.workloads.CoreWorkload", coreCreator{})
 }
