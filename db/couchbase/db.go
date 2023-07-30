@@ -3,61 +3,105 @@ package couchbase
 import (
 	"context"
 	"fmt"
-	"github.com/couchbase/gocb/v2"
+	gocb "github.com/couchbase/gocb/v2"
 	"github.com/magiconair/properties"
+	"github.com/pingcap/go-ycsb/pkg/prop"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
 	"log"
 	"time"
 )
 
-type dynamodbWrapper struct {
-	client *gocb.Cluster
-	bucket *gocb.Bucket
+const KEY_SEPARATOR = ":"
+const KEYSPACE_SEPARATOR = "."
+
+type couchbaseWrapper struct {
+	client            *gocb.Cluster
+	bucket            *gocb.Bucket
+	collection        *gocb.Collection
+	bucketName        string
+	scopeName         string
+	collectionName    string
+	scopeEnabled      bool
+	collectionEnabled bool
+	upsert            bool
+	verbose           bool
 }
 
-func (r *dynamodbWrapper) Close() error {
-	return nil
+/**
+ * Helper function to generate the keyspace name.
+ * @return a string with the computed keyspace name
+ */
+func (r *couchbaseWrapper) getKeyspaceName() (keyspaceName string) {
+	if r.scopeEnabled || r.collectionEnabled {
+		keyspaceName = r.bucketName + KEYSPACE_SEPARATOR + r.scopeName + KEYSPACE_SEPARATOR + r.collectionName
+	} else {
+		keyspaceName = r.bucketName
+	}
+	return
 }
 
-func (r *dynamodbWrapper) InitThread(ctx context.Context, _ int, _ int) context.Context {
+func (r *couchbaseWrapper) Close() (err error) {
+	return
+}
+
+func (r *couchbaseWrapper) InitThread(ctx context.Context, _ int, _ int) context.Context {
 	return ctx
 }
 
-func (r *dynamodbWrapper) CleanupThread(_ context.Context) {
+func (r *couchbaseWrapper) CleanupThread(_ context.Context) {
 }
 
-func (r *dynamodbWrapper) Read(ctx context.Context, table string, key string, fields []string) (data map[string][]byte, err error) {
+func (r *couchbaseWrapper) Read(ctx context.Context, table string, key string, fields []string) (data map[string][]byte, err error) {
 
 	return
 
 }
 
-func (r *dynamodbWrapper) Scan(ctx context.Context, table string, startKey string, count int, fields []string) ([]map[string][]byte, error) {
+func (r *couchbaseWrapper) Scan(ctx context.Context, table string, startKey string, count int, fields []string) ([]map[string][]byte, error) {
 	return nil, fmt.Errorf("scan is not supported")
 }
 
-func (r *dynamodbWrapper) Update(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
+func (r *couchbaseWrapper) Update(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
 
 	return
 }
 
-func (r *dynamodbWrapper) Insert(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
-
+func (r *couchbaseWrapper) Insert(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
+	id := table + KEY_SEPARATOR + key
+	if r.upsert {
+		_, err = r.collection.Upsert(id, values, nil)
+		if err != nil {
+			log.Fatalf("Error while upserting document with id %s and values %v", id, err)
+		}
+	} else {
+		_, err = r.collection.Insert(id, values, nil)
+		if err != nil {
+			log.Fatalf("Error while inserting document with id %s and values %v", id, err)
+		}
+	}
 	return
 }
 
-func (r *dynamodbWrapper) Delete(ctx context.Context, table string, key string) error {
+func (r *couchbaseWrapper) Delete(ctx context.Context, table string, key string) error {
 	return nil
 }
 
-type dynamoDbCreator struct{}
+type couchbaseCreator struct{}
 
-func (r dynamoDbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
-	rds := &dynamodbWrapper{}
+func (r couchbaseCreator) Create(p *properties.Properties) (ycsb.DB, error) {
+	cb := &couchbaseWrapper{}
+	cb.verbose = p.GetBool(prop.Verbose, prop.VerboseDefault)
+	if cb.verbose {
+		gocb.SetLogger(gocb.DefaultStdioLogger())
+	}
 	host := p.GetString(host, hostDefault)
-	bucketName := p.GetString(bucket, bucketDefault)
+	cb.bucketName = p.GetString(bucket, bucketDefault)
+	cb.scopeName = p.GetString(scope, scopeDefault)
+	cb.collectionName = p.GetString(collection, collectionDefault)
+	cb.upsert = p.GetBool(upsert, upsertDefault)
 	username := p.GetString(username, usernameDefault)
 	password := p.GetString(password, passwordDefault)
+
 	options := gocb.ClusterOptions{
 		Authenticator: gocb.PasswordAuthenticator{
 			Username: username,
@@ -74,22 +118,35 @@ func (r dynamoDbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	}
 
 	// Initialize the Connection
-	rds.client, err = gocb.Connect("couchbases://"+host, options)
+	cb.client, err = gocb.Connect("couchbases://"+host, options)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Error while connecting to %s. Error: %s", host, err.Error())
 	}
 
-	rds.bucket = rds.client.Bucket(bucketName)
-
-	err = rds.bucket.WaitUntilReady(5*time.Second, nil)
+	err = cb.client.WaitUntilReady(time.Second*3, nil)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Error while waiting until ready: %s", err.Error())
 	}
-	return rds, err
+	cb.bucket = cb.client.Bucket(cb.bucketName)
+	err = cb.bucket.WaitUntilReady(5*time.Second, nil)
+	if err != nil {
+		log.Fatalf("Error while waiting for bucket: %s", err.Error())
+	}
+
+	cb.collection = cb.bucket.Scope(cb.scopeName).Collection(cb.collectionName)
+	pingres, err := cb.client.Ping(nil)
+	if err != nil {
+		log.Fatalf("Error while ping: %s", err.Error())
+	} else {
+		jsondata, _ := pingres.MarshalJSON()
+		log.Printf("Couchbase PING result: %s", jsondata)
+	}
+
+	return cb, err
 }
 
-func (rds *dynamodbWrapper) deleteTable() error {
-
+func (cb *couchbaseWrapper) deleteTable() (err error) {
+	return
 }
 
 const (
@@ -99,7 +156,15 @@ const (
 
 	// The bucket name to use.
 	bucket        = "couchbase.bucket"
-	bucketDefault = "default"
+	bucketDefault = "ycsb"
+
+	// The scope to use.
+	scope        = "couchbase.scope"
+	scopeDefault = "_default"
+
+	// The collection to use.
+	collection        = "couchbase.collection"
+	collectionDefault = "_default"
 
 	// The password of the bucket.
 	password        = "couchbase.password"
@@ -132,11 +197,11 @@ const (
 
 	// If set to false, mutation operations will also be performed through N1QL.
 	kv        = "couchbase.kv"
-	kvDefault = false
+	kvDefault = true
 
 	// The server parallelism for all n1ql queries.
 	maxParallelism        = "couchbase.maxParallelism"
-	maxParallelismDefault = 1
+	maxParallelismDefault = 0
 
 	// The number of KV sockets to open per server.
 	kvEndpoints        = "couchbase.kvEndpoints"
@@ -170,5 +235,5 @@ const (
 )
 
 func init() {
-	ycsb.RegisterDBCreator("couchbase", dynamoDbCreator{})
+	ycsb.RegisterDBCreator("couchbase", couchbaseCreator{})
 }

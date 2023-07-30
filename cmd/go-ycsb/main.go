@@ -76,6 +76,8 @@ import (
 	_ "github.com/pingcap/go-ycsb/db/etcd"
 	// Register dynamodb
 	_ "github.com/pingcap/go-ycsb/db/dynamodb"
+	// Register Couchbase
+	_ "github.com/pingcap/go-ycsb/db/couchbase"
 )
 
 var (
