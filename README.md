@@ -349,7 +349,7 @@ Common configurations:
 | couchbase.collection     | "_default"    | The collection to use                                        |
 | couchbase.persistTo      | 0             | Persistence durability requirement                           |
 | couchbase.replicateTo    | 0             | Replication durability requirement                           |
-| couchbase.upsert         | false         | Use upsert instead of insert or replace                      |
+| couchbase.upsert         | false         | Use upsert instead of insert                                 |
 | couchbase.documentExpiry | 0             | Amount of time(second) until a document expires in Couchbase |
 | couchbase.kvTimeout      | 2000          | Upsert/Insert/Read operations timeout in milliseconds        |
 
