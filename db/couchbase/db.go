@@ -12,7 +12,6 @@ import (
 )
 
 const KEY_SEPARATOR = ":"
-const KEYSPACE_SEPARATOR = "."
 
 type couchbaseWrapper struct {
 	client            *gocb.Cluster
@@ -21,23 +20,17 @@ type couchbaseWrapper struct {
 	bucketName        string
 	scopeName         string
 	collectionName    string
+	persistTo         uint
+	replicateTo       uint
 	scopeEnabled      bool
 	collectionEnabled bool
 	upsert            bool
+	upsertOptions     *gocb.UpsertOptions
+	insertOptions     *gocb.InsertOptions
+	replaceOptions    *gocb.ReplaceOptions
+	getOptions        *gocb.GetOptions
+	kvTimeout         time.Duration
 	verbose           bool
-}
-
-/**
- * Helper function to generate the keyspace name.
- * @return a string with the computed keyspace name
- */
-func (r *couchbaseWrapper) getKeyspaceName() (keyspaceName string) {
-	if r.scopeEnabled || r.collectionEnabled {
-		keyspaceName = r.bucketName + KEYSPACE_SEPARATOR + r.scopeName + KEYSPACE_SEPARATOR + r.collectionName
-	} else {
-		keyspaceName = r.bucketName
-	}
-	return
 }
 
 func (r *couchbaseWrapper) Close() (err error) {
@@ -52,7 +45,16 @@ func (r *couchbaseWrapper) CleanupThread(_ context.Context) {
 }
 
 func (r *couchbaseWrapper) Read(ctx context.Context, table string, key string, fields []string) (data map[string][]byte, err error) {
+	id := getCouchbaseId(table, key)
+	getResult, err := r.collection.Get(id, r.getOptions)
+	if err != nil {
+		log.Fatal(err)
+	}
 
+	err = getResult.Content(&data)
+	if err != nil {
+		log.Fatal(err)
+	}
 	return
 
 }
@@ -62,21 +64,30 @@ func (r *couchbaseWrapper) Scan(ctx context.Context, table string, startKey stri
 }
 
 func (r *couchbaseWrapper) Update(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
-
+	id := getCouchbaseId(table, key)
+	_, err = r.collection.Replace(id, values, r.replaceOptions)
+	if err != nil {
+		log.Fatalf("Error while updating document with id %s. Error message: %v", id, err)
+	}
 	return
 }
 
-func (r *couchbaseWrapper) Insert(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
+func getCouchbaseId(table string, key string) string {
 	id := table + KEY_SEPARATOR + key
+	return id
+}
+
+func (r *couchbaseWrapper) Insert(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
+	id := getCouchbaseId(table, key)
 	if r.upsert {
-		_, err = r.collection.Upsert(id, values, nil)
+		_, err = r.collection.Upsert(id, values, r.upsertOptions)
 		if err != nil {
-			log.Fatalf("Error while upserting document with id %s and values %v", id, err)
+			log.Fatalf("Error while upserting document with id %s. Error message: %v", id, err)
 		}
 	} else {
-		_, err = r.collection.Insert(id, values, nil)
+		_, err = r.collection.Insert(id, values, r.insertOptions)
 		if err != nil {
-			log.Fatalf("Error while inserting document with id %s and values %v", id, err)
+			log.Fatalf("Error while inserting document with id %s. Error message: %v", id, err)
 		}
 	}
 	return
@@ -95,10 +106,38 @@ func (r couchbaseCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		gocb.SetLogger(gocb.DefaultStdioLogger())
 	}
 	host := p.GetString(host, hostDefault)
+	documentExpiry := time.Second * time.Duration(p.GetInt64(documentExpiry, documentExpiryDefault))
+	cb.kvTimeout = time.Millisecond * time.Duration(p.GetInt64(kvTimeout, kvTimeoutDefault))
 	cb.bucketName = p.GetString(bucket, bucketDefault)
 	cb.scopeName = p.GetString(scope, scopeDefault)
 	cb.collectionName = p.GetString(collection, collectionDefault)
+	cb.persistTo = p.GetUint(persistTo, persistToDefault)
+	cb.replicateTo = p.GetUint(replicateTo, replicateToDefault)
 	cb.upsert = p.GetBool(upsert, upsertDefault)
+	if cb.upsert {
+		cb.upsertOptions = &gocb.UpsertOptions{
+			PersistTo:   cb.persistTo,
+			ReplicateTo: cb.replicateTo,
+			Expiry:      documentExpiry,
+			Timeout:     cb.kvTimeout,
+		}
+	} else {
+		cb.insertOptions = &gocb.InsertOptions{
+			PersistTo:   cb.persistTo,
+			ReplicateTo: cb.replicateTo,
+			Expiry:      documentExpiry,
+			Timeout:     cb.kvTimeout,
+		}
+	}
+	cb.replaceOptions = &gocb.ReplaceOptions{
+		PersistTo:   cb.persistTo,
+		ReplicateTo: cb.replicateTo,
+		Expiry:      documentExpiry,
+		Timeout:     cb.kvTimeout,
+	}
+	cb.getOptions = &gocb.GetOptions{
+		Timeout: cb.kvTimeout,
+	}
 	username := p.GetString(username, usernameDefault)
 	password := p.GetString(password, passwordDefault)
 
@@ -123,7 +162,7 @@ func (r couchbaseCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		log.Fatalf("Error while connecting to %s. Error: %s", host, err.Error())
 	}
 
-	err = cb.client.WaitUntilReady(time.Second*3, nil)
+	err = cb.client.WaitUntilReady(5*time.Second, nil)
 	if err != nil {
 		log.Fatalf("Error while waiting until ready: %s", err.Error())
 	}
@@ -170,13 +209,9 @@ const (
 	password        = "couchbase.password"
 	passwordDefault = ""
 
-	// The password of the bucket.
+	// The username of the bucket.
 	username        = "couchbase.username"
 	usernameDefault = ""
-
-	// If mutations should wait for the response to complete.
-	syncMutationResponse        = "couchbase.syncMutationResponse"
-	syncMutationResponseDefault = true
 
 	// Persistence durability requirement
 	persistTo        = "couchbase.persistTo"
@@ -191,47 +226,13 @@ const (
 	upsert        = "couchbase.upsert"
 	upsertDefault = false
 
-	// If set to true, prepared statements are not used.
-	adhoc        = "couchbase.adhoc"
-	adhocDefault = false
-
-	// If set to false, mutation operations will also be performed through N1QL.
-	kv        = "couchbase.kv"
-	kvDefault = true
-
-	// The server parallelism for all n1ql queries.
-	maxParallelism        = "couchbase.maxParallelism"
-	maxParallelismDefault = 0
-
-	// The number of KV sockets to open per server.
-	kvEndpoints        = "couchbase.kvEndpoints"
-	kvEndpointsDefault = 1
-
-	// The number of N1QL Query sockets to open per server.
-	queryEndpoints        = "couchbase.queryEndpoints"
-	queryEndpointsDefault = 5
-
-	// If Epoll instead of NIO should be used (only available for linux.
-	epoll        = "couchbase.epoll"
-	epollDefault = false
-
-	// If > 0 trades CPU for higher throughput. N is the number of event loops,
-	// ideally set to the number of physical cores.
-	// Setting higher than that will likely degrade performance.
-	boost        = "couchbase.boost"
-	boostDefault = 3
-
-	// The interval in seconds when latency metrics will be logged.
-	networkMetricsInterval        = "couchbase.networkMetricsInterval"
-	networkMetricsIntervalDefault = 0
-
-	// The interval in seconds when runtime metrics will be logged.
-	runtimeMetricsInterval        = "couchbase.runtimeMetricsInterval"
-	runtimeMetricsIntervalDefault = 0
-
-	// Document Expiry is the amount of time(second) until a document expires in Couchbase.
+	// Amount of time(second) until a document expires in Couchbase
 	documentExpiry        = "couchbase.documentExpiry"
 	documentExpiryDefault = 0
+
+	// Upsert/Insert/Read operations timeout in milliseconds
+	kvTimeout        = "couchbase.kvTimeout"
+	kvTimeoutDefault = 2000
 )
 
 func init() {

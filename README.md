@@ -337,6 +337,22 @@ Common configurations:
 |dynamodb.delete.after.run.stage|false|Detele the database table after the run stage|
 
 
+### Couchbase
+
+| field                    | default value | description                                                  |
+|--------------------------|---------------|--------------------------------------------------------------|
+| couchbase.host           | "127.0.0.1"   | The hostname from one server                                 |
+| couchbase.password       | ""            | The password of the bucket                                   |
+| couchbase.username       | ""            | The username of the bucket                                   |
+| couchbase.bucket         | "ycsb"        | The bucket name to use                                       |
+| couchbase.scope          | "_default"    | The scope to use                                             |
+| couchbase.collection     | "_default"    | The collection to use                                        |
+| couchbase.persistTo      | 0             | Persistence durability requirement                           |
+| couchbase.replicateTo    | 0             | Replication durability requirement                           |
+| couchbase.upsert         | false         | Use upsert instead of insert or replace                      |
+| couchbase.documentExpiry | 0             | Amount of time(second) until a document expires in Couchbase |
+| couchbase.kvTimeout      | 2000          | Upsert/Insert/Read operations timeout in milliseconds        |
+
 
 ## TODO
 
