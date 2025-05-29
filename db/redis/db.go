@@ -3,10 +3,11 @@ package redis
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	json "github.com/segmentio/encoding/json"
 
 	"github.com/magiconair/properties"
 	"github.com/pingcap/go-ycsb/pkg/prop"
