@@ -4,16 +4,35 @@ Instructions for AI coding agents (Claude Code, Copilot, Cursor, etc.) working i
 
 ## Project overview
 
-<!-- TODO: one paragraph describing what this repo does -->
+go-ycsb is a Go port of the Yahoo Cloud Serving Benchmark (YCSB). It supports all standard YCSB generators and the Core workload, enabling CRUD performance benchmarking across multiple databases — with a particular focus on Redis and Redis Cluster. The tool provides load and run subcommands, configurable workload files, and pluggable database backends (Redis, MySQL, PostgreSQL, MongoDB, Cassandra, DynamoDB, and more).
 
 ## Local setup
 
-<!-- TODO: mirror the setup steps from CONTRIBUTING.md -->
+```bash
+git clone git@github.com:redis-performance/go-ycsb.git
+cd go-ycsb
+
+# Build the binary (outputs to bin/go-ycsb)
+make
+
+# Verify the build
+./bin/go-ycsb --help
+```
+
+Requirements:
+- Go 1.20 or later (`go version` to check)
+- Optional: FoundationDB client library, RocksDB, or libsqlite3 for those database backends (the Makefile detects them automatically)
+
+To install dependencies only:
 
 ```bash
-# Example
-git clone git@github.com:redis-performance/<repo>.git
-cd <repo>
+go mod download
+```
+
+To build without make:
+
+```bash
+go build -o bin/go-ycsb cmd/go-ycsb/main.go
 ```
 
 ## Branch naming
@@ -29,11 +48,8 @@ Same as human contributors: `<type>/<short-description>` (e.g. `fix/off-by-one-i
 
 ## Running tests
 
-<!-- TODO: exact command to run tests -->
-
 ```bash
-# Example
-make test
+go test ./...
 ```
 
 Always run tests before declaring a task complete.
@@ -42,8 +58,8 @@ Always run tests before declaring a task complete.
 
 1. Create a branch: `git checkout -b <type>/<description>`.
 2. Commit with a clear message focused on *why*, not *what*.
-3. Open a pull request against `main`.
-4. Do **not** push directly to `main`.
+3. Open a pull request against `master`.
+4. Do **not** push directly to `master`.
 
 ## What to avoid
 
