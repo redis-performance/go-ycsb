@@ -54,8 +54,10 @@ Run the full test suite with:
 go test ./...
 ```
 
+Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run the test suite — running `go test ./...` locally before opening a PR is the contributor's responsibility.
+
 ## Review process
 
 - At least one maintainer approval is required before merge.
-- CI must be green.
+- CI must be green (the cross-platform build must succeed).
 - Maintainers may request changes or close PRs that do not meet the bar — this is normal and not personal.
