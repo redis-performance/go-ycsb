@@ -32,7 +32,7 @@ go mod download
 To build without make:
 
 ```bash
-go build -o bin/go-ycsb cmd/go-ycsb/main.go
+go build -o bin/go-ycsb cmd/go-ycsb/
 ```
 
 ## Branch naming
