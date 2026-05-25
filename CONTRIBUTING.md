@@ -4,14 +4,20 @@ We treat this repo as "Open Source" within Redis: anyone who clears the bar belo
 
 ## Local setup
 
-<!-- TODO: fill in repo-specific setup steps -->
-
 ```bash
-# Example — replace with actual steps
-git clone git@github.com:redis-performance/<repo>.git
-cd <repo>
-# install dependencies, build, etc.
+git clone git@github.com:redis-performance/go-ycsb.git
+cd go-ycsb
+
+# Build the binary (outputs to bin/go-ycsb)
+make
+
+# Give it a try
+./bin/go-ycsb --help
 ```
+
+Requirements:
+- Go 1.20 or later (`go version` to check)
+- Optional: FoundationDB client library, RocksDB, or libsqlite3 for those database backends (the Makefile detects them automatically)
 
 ## Branch naming
 
@@ -31,9 +37,9 @@ Example: `feat/add-pipeline-mode`
 
 ## Submitting changes
 
-1. Fork or create a branch from `main`.
+1. Fork or create a branch from `master`.
 2. Make your changes with clear, atomic commits.
-3. Open a pull request against `main` with a descriptive title and summary.
+3. Open a pull request against `master` with a descriptive title and summary.
 4. Address review comments promptly; force-push to the same branch to update.
 
 ## Testing
@@ -42,10 +48,14 @@ Example: `feat/add-pipeline-mode`
 - Existing tests must pass: run the test suite locally before opening a PR.
 - Coverage should not decrease.
 
-<!-- TODO: add the exact test command for this repo -->
+Run the full test suite with:
+
+```bash
+go test ./...
+```
 
 ## Review process
 
 - At least one maintainer approval is required before merge.
 - CI must be green.
-- Maintainers may request changes or close PRs that don't meet the bar — this is normal and not personal.
+- Maintainers may request changes or close PRs that do not meet the bar — this is normal and not personal.
