@@ -1,10 +1,8 @@
-name: Docker Publish
+name: Docker Publish - Release
 
 on:
-  push:
-    branches: [master]
-    paths-ignore:
-      - '**.md'
+  release:
+    types: [published]
 
 env:
   REGISTRY: docker.io
@@ -39,8 +37,10 @@ jobs:
       with:
         images: ${{ env.IMAGE_NAME }}
         tags: |
+          type=ref,event=tag
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
           type=raw,value=latest
-          type=raw,value=master-{{sha}}
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
@@ -55,7 +55,8 @@ jobs:
 
     - name: Generate summary
       run: |
-        echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 Docker Release Published" >> $GITHUB_STEP_SUMMARY
         echo "**Repository:** \`${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Release:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Tags:** ${{ steps.docker_meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
         echo "🔗 [View on Docker Hub](https://hub.docker.com/r/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
