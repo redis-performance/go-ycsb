@@ -7,14 +7,15 @@ on:
       - '**.md'
 
 env:
-  REGISTRY: docker.io
-  IMAGE_NAME: redis/go-ycsb
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/redis-performance/go-ycsb
 
 jobs:
   docker-publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
 
     steps:
     - name: Checkout repository
@@ -26,12 +27,12 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
 
-    - name: Log in to Docker Hub
+    - name: Log in to GitHub Container Registry
       uses: docker/login-action@v4
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ secrets.DOCKER_HUB_USERNAME }}
-        password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Extract metadata for Docker
       id: docker_meta
@@ -55,7 +56,7 @@ jobs:
 
     - name: Generate summary
       run: |
-        echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
+        echo "## Docker Image Published" >> $GITHUB_STEP_SUMMARY
         echo "**Repository:** \`${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
         echo "**Tags:** ${{ steps.docker_meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
-        echo "🔗 [View on Docker Hub](https://hub.docker.com/r/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
+        echo "[View on GHCR](https://github.com/orgs/redis-performance/packages/container/package/go-ycsb)" >> $GITHUB_STEP_SUMMARY
