@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/magiconair/properties"
@@ -16,6 +17,7 @@ import (
 type histograms struct {
 	p *properties.Properties
 
+	mu         sync.RWMutex
 	histograms map[string]*histogram
 }
 
@@ -23,6 +25,10 @@ func (h *histograms) GenerateExtendedOutputs() {
 	exportHistograms := h.p.GetBool(prop.MeasurementHistogramPercentileExport, prop.MeasurementHistogramPercentileExportDefault)
 	if exportHistograms {
 		exportHistogramsFilepath := h.p.GetString(prop.MeasurementHistogramPercentileExportFilepath, prop.MeasurementHistogramPercentileExportFilepathDefault)
+
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+
 		for op, opM := range h.histograms {
 			outFile := fmt.Sprintf("%s%s-percentiles.txt", exportHistogramsFilepath, op)
 			fmt.Printf("Exporting the full latency spectrum for operation '%s' in percentile output format into file: %s.\n", op, outFile)
@@ -42,16 +48,30 @@ func (h *histograms) GenerateExtendedOutputs() {
 }
 
 func (h *histograms) Measure(op string, start time.Time, lan time.Duration) {
+	// Fast path: try to get histogram with read lock
+	h.mu.RLock()
 	opM, ok := h.histograms[op]
+	h.mu.RUnlock()
+
+	// Slow path: create new histogram if needed
 	if !ok {
-		opM = newHistogram()
-		h.histograms[op] = opM
+		h.mu.Lock()
+		// Double-check after acquiring write lock
+		opM, ok = h.histograms[op]
+		if !ok {
+			opM = newHistogram()
+			h.histograms[op] = opM
+		}
+		h.mu.Unlock()
 	}
 
 	opM.Measure(lan)
 }
 
 func (h *histograms) summary() map[string][]string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	summaries := make(map[string][]string, len(h.histograms))
 	for op, opM := range h.histograms {
 		summaries[op] = opM.Summary()

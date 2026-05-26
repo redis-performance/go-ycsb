@@ -209,6 +209,9 @@ func (c *core) getValueBuffer(size int) []byte {
 		return buf[0:size]
 	}
 
+	// If pooled buffer is too small, put it back and allocate a new one
+	// The new larger buffer will be returned to the pool later
+	c.valuePool.Put(buf)
 	return make([]byte, size)
 }
 

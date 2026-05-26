@@ -27,6 +27,12 @@ import (
 
 var header = []string{"Operation", "Takes(s)", "Count", "OPS", "Avg(us)", "Min(us)", "Max(us)", "50th(us)", "90th(us)", "95th(us)", "99th(us)", "99.9th(us)", "99.99th(us)"}
 
+type measureEvent struct {
+	op    string
+	start time.Time
+	lan   time.Duration
+}
+
 type measurement struct {
 	sync.RWMutex
 
@@ -35,10 +41,12 @@ type measurement struct {
 	measurer ycsb.Measurer
 }
 
+var measureChan chan measureEvent
+var measureWg sync.WaitGroup
+var measureOnce sync.Once
+
 func (m *measurement) measure(op string, start time.Time, lan time.Duration) {
-	m.Lock()
 	m.measurer.Measure(op, start, lan)
-	m.Unlock()
 }
 
 func (m *measurement) output() {
@@ -89,10 +97,23 @@ func InitMeasure(p *properties.Properties) {
 		panic("unsupported measurement type: " + measurementType)
 	}
 	EnableWarmUp(p.GetInt64(prop.WarmUpTime, 0) > 0)
+
+	measureChan = make(chan measureEvent, 1000000) // tune size if needed
+	measureWg.Add(1)
+	go func() {
+		defer measureWg.Done()
+		for ev := range measureChan {
+			globalMeasure.measure(ev.op, ev.start, ev.lan)
+		}
+	}()
 }
 
 // Output prints the complete measurements.
 func Output() {
+	measureOnce.Do(func() {
+		close(measureChan)
+		measureWg.Wait()
+	})
 	globalMeasure.measurer.GenerateExtendedOutputs()
 	globalMeasure.output()
 }
@@ -119,7 +140,8 @@ func IsWarmUpFinished() bool {
 // Measure measures the operation.
 func Measure(op string, start time.Time, lan time.Duration) {
 	if IsWarmUpFinished() {
-		globalMeasure.measure(op, start, lan)
+		// Retry until we can send to the channel
+		measureChan <- measureEvent{op, start, lan}
 	}
 }
 
