@@ -46,6 +46,17 @@ Notice:
 + To use FoundationDB, you must install [client](https://www.foundationdb.org/download/) library at first, now the supported version is 6.2.11.
 + To use RocksDB, you must follow [INSTALL](https://github.com/facebook/rocksdb/blob/master/INSTALL.md) to install RocksDB at first.
 
+## Docker
+
+Pre-built Docker images are available on Docker Hub:
+
+```bash
+docker pull redis/go-ycsb:latest
+docker run --rm redis/go-ycsb --help
+```
+
+Images are built for `linux/amd64` and `linux/arm64`.
+
 ## Usage
 
 Mostly, we can start from the official document [Running-a-Workload](https://github.com/brianfrankcooper/YCSB/wiki/Running-a-Workload).
