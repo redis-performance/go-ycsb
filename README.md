@@ -1,5 +1,8 @@
 # go-ycsb
 
+[![Docker Pulls](https://img.shields.io/docker/pulls/redis/go-ycsb)](https://hub.docker.com/r/redis/go-ycsb)
+[![CI](https://github.com/redis-performance/go-ycsb/actions/workflows/go.yml/badge.svg)](https://github.com/redis-performance/go-ycsb/actions/workflows/go.yml)
+
 go-ycsb is a Go port of [YCSB](https://github.com/brianfrankcooper/YCSB). It fully supports all YCSB generators and the Core workload so we can do the basic CRUD benchmarks with Go.
 
 ## Why another Go YCSB?
