@@ -30,3 +30,4 @@ ADD workloads /workloads
 EXPOSE 6060
 
 ENTRYPOINT [ "/usr/local/bin/dumb-init", "/go-ycsb" ]
+
