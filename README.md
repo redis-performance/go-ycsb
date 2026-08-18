@@ -313,10 +313,12 @@ Common configurations:
 |mongodb.authdb|"admin"|Authentication database|
 |mongodb.username|N/A|Username for authentication|
 |mongodb.password|N/A|Password for authentication|
-|mongodb.write_concern|N/A|Write concern: "majority" or a numeric ack count (e.g. "1", "2")|
-|mongodb.write_concern_journal|false|Also require the write to hit the on-disk journal; combine with mongodb.write_concern=majority for durable/synchronous writes|
-|mongodb.read_concern|N/A|Read concern: "local", "available", "majority", "linearizable", or "snapshot"|
+|mongodb.write_concern|N/A|Write concern: "majority" or a numeric ack count (e.g. "1", "2"). "0" (unacknowledged) is supported: Insert/Update/Delete treat the driver's expected ErrUnacknowledgedWrite as success rather than a failure|
+|mongodb.write_concern_journal|false|Also require the write to hit the on-disk journal; combine with mongodb.write_concern=majority for durable/synchronous writes. Incompatible with mongodb.write_concern=0|
+|mongodb.write_concern_timeout|N/A|How long the server waits for the configured write concern (e.g. majority) to be satisfied before giving up, e.g. "5s". Without it, majority against a replica set that can't currently reach a majority blocks indefinitely|
+|mongodb.read_concern|N/A|Read concern: "local", "available", "majority", or "linearizable" ("snapshot" is not offered - it requires a transaction this adapter never opens)|
 |mongodb.read_preference|N/A|Read preference: "primary", "primaryPreferred", "secondary", "secondaryPreferred", or "nearest"|
+|mongodb.socket_timeout|N/A|Timeout for socket reads/writes, e.g. "10s". Without it, a stalled connection (e.g. a silently dropped network path) can hang an operation indefinitely|
 
 ### Redis
 |field|default value|description|
