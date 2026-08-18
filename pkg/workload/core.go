@@ -732,8 +732,27 @@ func (coreCreator) Create(p *properties.Properties) (ycsb.Workload, error) {
 	if c.fieldValueIntegerMax < c.fieldValueIntegerMin {
 		util.Fatalf("%s (%d) must be >= %s (%d)", prop.FieldValueIntegerMax, c.fieldValueIntegerMax, prop.FieldValueIntegerMin, c.fieldValueIntegerMin)
 	}
+	// diff<0 (wrapped) or diff==MaxInt64 (diff+1 would wrap) both mean the
+	// span doesn't fit the int64 range Int63n needs; either panics at value
+	// generation time instead of failing cleanly here.
+	if diff := c.fieldValueIntegerMax - c.fieldValueIntegerMin; diff < 0 || diff == math.MaxInt64 {
+		util.Fatalf("%s..%s span is too large to fit in an int64", prop.FieldValueIntegerMin, prop.FieldValueIntegerMax)
+	}
 	if c.fieldValueFloatMax < c.fieldValueFloatMin {
 		util.Fatalf("%s (%v) must be >= %s (%v)", prop.FieldValueFloatMax, c.fieldValueFloatMax, prop.FieldValueFloatMin, c.fieldValueFloatMin)
+	}
+	switch c.fieldValueType {
+	case fieldValueTypeRandom, fieldValueTypeNumeric, fieldValueTypeInteger, fieldValueTypeFloat, fieldValueTypeBoolean, fieldValueTypeTimestamp:
+	default:
+		util.Fatalf("unknown %s %q: expected random, numeric, integer, float, boolean, or timestamp", prop.FieldValueType, c.fieldValueType)
+	}
+	switch c.lastFieldValueType {
+	case "", fieldValueTypeRandom, fieldValueTypeNumeric, fieldValueTypeInteger, fieldValueTypeFloat, fieldValueTypeBoolean, fieldValueTypeTimestamp:
+	default:
+		util.Fatalf("unknown %s %q: expected random, numeric, integer, float, boolean, or timestamp", prop.LastFieldValueType, c.lastFieldValueType)
+	}
+	if c.lastFieldValueType != "" && c.lastFieldName == "" {
+		util.Fatalf("%s is set but %s is not - it has no field to apply to", prop.LastFieldValueType, prop.LastFieldName)
 	}
 	c.fieldLengthGenerator = getFieldLengthGenerator(p)
 	c.recordCount = p.GetInt64(prop.RecordCount, prop.RecordCountDefault)

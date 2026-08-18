@@ -23,8 +23,8 @@
 #     spec's ~17GB, since Redis listpack-encodes digit-only values as
 #     integers.
 #   - Whole-entity online serving read: one round-trip fetching every field
-#     (Redis: HGETALL: Mongo: findOne with no field-list, matching the
-#     dbCheckAllFields path in each db/*/db.go adapter).
+#     (Redis: HGETALL; Mongo: findOne projecting all 51 field names, i.e.
+#     the whole document).
 #   - Whole-row feature materialization write: one round-trip writing every
 #     field (Redis: HSET key f1 v1 ... f51 v51; Mongo: $set of every field).
 #   - Read-dominated online serving, ~95:5 (HGETALL:HSET == 19:1), against a

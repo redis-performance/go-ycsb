@@ -98,8 +98,12 @@ check_output() {
 
   # go-ycsb also prints interim progress lines with the same op-name prefix
   # while a run is in flight; only the LAST match is the final summary.
+  # The trailing `|| true` matters under `set -euo pipefail`: without it, a
+  # pipeline that finds no match (e.g. the op never appeared in output at
+  # all) exits non-zero and set -e would kill the script right here, before
+  # the "no summary line found" diagnostic below ever runs.
   local got
-  got=$(echo "$out" | grep -E "^${line_prefix}[[:space:]]" | tail -n 1 | grep -oE 'Count: [0-9]+' | grep -oE '[0-9]+')
+  got=$(echo "$out" | grep -E "^${line_prefix}[[:space:]]" | tail -n 1 | grep -oE 'Count: [0-9]+' | grep -oE '[0-9]+' || true)
   if [ -z "$got" ]; then
     echo "FAIL: no '${line_prefix}' summary line found in output"
     echo "$out"

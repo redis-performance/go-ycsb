@@ -87,6 +87,14 @@ func (r *redis) Read(ctx context.Context, table string, key string, fields []str
 				err = errI
 				return
 			}
+			// Redis never stores a hash with zero fields (deleting the last
+			// field deletes the key), so an empty reply unambiguously means
+			// the key doesn't exist - surface that as an error rather than a
+			// silent empty-but-successful read, matching the HMGET path below.
+			if len(mapReply) == 0 {
+				err = fmt.Errorf("redis: no such key %q", getKeyName(table, key))
+				return
+			}
 			for fieldName, value := range mapReply {
 				data[fieldName] = []byte(value)
 			}

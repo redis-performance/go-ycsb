@@ -189,18 +189,22 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	t := uint64(p.GetInt64(prop.ThreadCount, prop.ThreadCountDefault))
 	cliOpts.SetMaxPoolSize(t)
 
-	if wc, ok := p.Get(mongodbWriteConcern); ok {
+	wc, wcOk := p.Get(mongodbWriteConcern)
+	journal := p.GetBool(mongodbWriteConcernJournal, false)
+	if wcOk || journal {
 		var wcOpts []writeconcern.Option
-		if strings.EqualFold(wc, "majority") {
-			wcOpts = append(wcOpts, writeconcern.WMajority())
-		} else {
-			w, err := strconv.Atoi(wc)
-			if err != nil {
-				return nil, fmt.Errorf("invalid %s %q: must be \"majority\" or an integer ack count", mongodbWriteConcern, wc)
+		if wcOk {
+			if strings.EqualFold(wc, "majority") {
+				wcOpts = append(wcOpts, writeconcern.WMajority())
+			} else {
+				w, err := strconv.Atoi(wc)
+				if err != nil {
+					return nil, fmt.Errorf("invalid %s %q: must be \"majority\" or an integer ack count", mongodbWriteConcern, wc)
+				}
+				wcOpts = append(wcOpts, writeconcern.W(w))
 			}
-			wcOpts = append(wcOpts, writeconcern.W(w))
 		}
-		if p.GetBool(mongodbWriteConcernJournal, false) {
+		if journal {
 			wcOpts = append(wcOpts, writeconcern.J(true))
 		}
 		cliOpts.SetWriteConcern(writeconcern.New(wcOpts...))
@@ -251,12 +255,12 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		return nil, errors.New("auth failed")
 	}
 
-	fmt.Println("Connected to MongoDB!")
-
 	dbName := mongodbDatabaseDefault
 	if connString.Database != "" {
 		dbName = connString.Database
 	}
+	fmt.Printf("Connected to MongoDB! Using database %q\n", dbName)
+
 	m := &mongoDB{
 		cli: cli,
 		db:  cli.Database(dbName),
