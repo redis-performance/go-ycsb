@@ -54,7 +54,14 @@ Run the full test suite with:
 go test ./...
 ```
 
-Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run the test suite — running `go test ./...` locally before opening a PR is the contributor's responsibility.
+If your change touches a database adapter or the core workload, also run the relevant integration test, e.g.:
+
+```bash
+# Feature-store workload load+run against dockerized Redis + MongoDB
+make test-integration-feature-store
+```
+
+Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run `go test ./...` — that remains the contributor's responsibility locally before opening a PR. A separate CI job (`.github/workflows/integration.yml`) does run `make test-integration-feature-store` against dockerized Redis/MongoDB on every push/PR to `master`.
 
 ## Review process
 
