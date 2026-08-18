@@ -14,7 +14,6 @@
 package measurement
 
 import (
-	"sort"
 	"time"
 
 	hdrhistogram "github.com/HdrHistogram/hdrhistogram-go"
@@ -22,9 +21,8 @@ import (
 )
 
 type histogram struct {
-	boundCounts util.ConcurrentMap
-	startTime   time.Time
-	hist        *hdrhistogram.Histogram
+	startTime time.Time
+	hist      *hdrhistogram.Histogram
 }
 
 // Metric name.
@@ -78,9 +76,6 @@ func (h *histogram) getInfo() map[string]interface{} {
 	max := h.hist.Max()
 	avg := int64(h.hist.Mean())
 	count := h.hist.TotalCount()
-
-	bounds := h.boundCounts.Keys()
-	sort.Ints(bounds)
 
 	per50 := h.hist.ValueAtPercentile(50)
 	per90 := h.hist.ValueAtPercentile(90)

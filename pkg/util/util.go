@@ -36,10 +36,26 @@ func Fatal(args ...interface{}) {
 
 var letters = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-// RandBytes fills the bytes with alphabetic characters randomly
+const letterIdxBits = 6                    // 6 bits to represent a letter index (0-63)
+const letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+const letterIdxMax = 63 / letterIdxBits    // # of letter indices fitting in 63 bits
+
+// RandBytes fills the bytes with alphabetic characters randomly.
+// Optimized version that uses bit manipulation to extract multiple random
+// indices from a single random number, reducing calls to rand.Int63().
 func RandBytes(r *rand.Rand, b []byte) {
-	for i := range b {
-		b[i] = letters[r.Intn(len(letters))]
+	// Use a more efficient algorithm that extracts multiple indices
+	// from a single random number using bit masking
+	for i, cache, remain := len(b)-1, r.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = r.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letters) {
+			b[i] = letters[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
 	}
 }
 
