@@ -29,6 +29,7 @@ type redisClient interface {
 	HGetAll(ctx context.Context, key string) *goredis.MapStringStringCmd
 	Do(ctx context.Context, args ...interface{}) *goredis.Cmd
 	Pipeline() goredis.Pipeliner
+	TxPipeline() goredis.Pipeliner
 	Scan(ctx context.Context, cursor uint64, match string, count int64) *goredis.ScanCmd
 	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *goredis.StatusCmd
 	Del(ctx context.Context, keys ...string) *goredis.IntCmd
@@ -60,7 +61,11 @@ func (r *redis) Read(ctx context.Context, table string, key string, fields []str
 	switch r.datatype {
 	case JSON_DATATYPE:
 		cmds := make([]*goredis.Cmd, len(fields))
-		pipe := r.client.Pipeline()
+		// TxPipeline (MULTI/EXEC), not Pipeline: every command below targets
+		// the same single key, so this is a valid single-slot transaction
+		// even in cluster mode, and it makes the whole-entity read atomic
+		// with respect to a concurrent whole-entity write (see Update below).
+		pipe := r.client.TxPipeline()
 		for pos, fieldName := range fields {
 			cmds[pos] = pipe.Do(ctx, JSON_GET, getKeyName(table, key), getFieldJsonPath(fieldName))
 		}
@@ -107,6 +112,7 @@ func (r *redis) Read(ctx context.Context, table string, key string, fields []str
 		}
 		sliceReply, errI := r.client.Do(ctx, args...).StringSlice()
 		if errI != nil {
+			err = errI
 			return
 		}
 		for pos, slicePos := range sliceReply {
@@ -143,7 +149,10 @@ func (r *redis) Update(ctx context.Context, table string, key string, values map
 	switch r.datatype {
 	case JSON_DATATYPE:
 		cmds := make([]*goredis.Cmd, 0, len(values))
-		pipe := r.client.Pipeline()
+		// TxPipeline: see the matching comment in Read - all commands target
+		// the same key, so MULTI/EXEC keeps the whole-row write atomic
+		// instead of letting a concurrent reader observe a torn row.
+		pipe := r.client.TxPipeline()
 		for fieldName, bytes := range values {
 			cmd := pipe.Do(ctx, JSON_SET, getKeyName(table, key), getFieldJsonPath(fieldName), jsonEscape(bytes))
 			cmds = append(cmds, cmd)
@@ -252,27 +261,38 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	mode := p.GetString(redisMode, redisModeDefault)
 	switch mode {
 	case "cluster":
-		clusterClient := goredis.NewClusterClient(getOptionsCluster(p))
-		// ReloadState reloads cluster state. It calls ClusterSlots func
-		// to get cluster slots information.
-		clusterClient.ReloadState(context.Background())
-		err := clusterClient.Ping(context.Background()).Err()
+		clusterOpts, err := getOptionsCluster(p)
 		if err != nil {
 			return nil, err
 		}
-		rds.client = clusterClient
+		clusterClient := goredis.NewClusterClient(clusterOpts)
+		// ReloadState reloads cluster state. It calls ClusterSlots func
+		// to get cluster slots information.
+		clusterClient.ReloadState(context.Background())
+		err = clusterClient.Ping(context.Background()).Err()
+		if err != nil {
+			return nil, err
+		}
 		if p.GetBool(prop.DropData, prop.DropDataDefault) {
-			err := rds.client.FlushDB(context.Background()).Err()
+			// FlushDB has no key argument, so on a ClusterClient it is
+			// routed to a single random master rather than every shard -
+			// fan it out to every master explicitly so dropdata=true
+			// actually clears the whole cluster, not one node's worth.
+			err := clusterClient.ForEachMaster(context.Background(), func(ctx context.Context, master *goredis.Client) error {
+				return master.FlushDB(ctx).Err()
+			})
 			if err != nil {
 				return nil, err
 			}
 		}
+		rds.client = clusterClient
 	case "single":
-		fallthrough
-	default:
-		mode = "single"
-		singleEndpointClient := goredis.NewClient(getOptionsSingle(p))
-		err := singleEndpointClient.Ping(context.Background()).Err()
+		singleOpts, err := getOptionsSingle(p)
+		if err != nil {
+			return nil, err
+		}
+		singleEndpointClient := goredis.NewClient(singleOpts)
+		err = singleEndpointClient.Ping(context.Background()).Err()
 		if err != nil {
 			return nil, err
 		}
@@ -284,6 +304,8 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 				return nil, err
 			}
 		}
+	default:
+		return nil, fmt.Errorf("unknown %s %q: expected \"single\" or \"cluster\"", redisMode, mode)
 	}
 	rds.mode = mode
 	rds.datatype = p.GetString(redisDatatype, redisDatatypeDefault)
@@ -328,22 +350,32 @@ const (
 	redisTLSInsecureSkipVerify = "redis.tls_insecure_skip_verify"
 )
 
-func parseTLS(p *properties.Properties) *tls.Config {
+// parseTLS returns (nil, nil) when no TLS property is set at all - the
+// caller then dials plaintext, same as before. Any other outcome (a cert
+// error, or only one of tls_cert/tls_key set) is returned as an error
+// instead of silently falling back to plaintext: dialing unencrypted
+// because a cert path was mistyped is a data-in-transit exposure, not a
+// condition to swallow.
+func parseTLS(p *properties.Properties) (*tls.Config, error) {
 	caPath, _ := p.Get(redisTLSCA)
 	certPath, _ := p.Get(redisTLSCert)
 	keyPath, _ := p.Get(redisTLSKey)
 	insecureSkipVerify := p.GetBool(redisTLSInsecureSkipVerify, false)
-	if (certPath != "" && keyPath != "") || (caPath != "") {
-		config, err := util.CreateTLSConfig(caPath, certPath, keyPath, insecureSkipVerify)
-		if err == nil {
-			return config
-		}
-	}
 
-	return nil
+	if caPath == "" && certPath == "" && keyPath == "" {
+		return nil, nil
+	}
+	if (certPath != "") != (keyPath != "") {
+		return nil, fmt.Errorf("%s and %s must be set together", redisTLSCert, redisTLSKey)
+	}
+	config, err := util.CreateTLSConfig(caPath, certPath, keyPath, insecureSkipVerify)
+	if err != nil {
+		return nil, fmt.Errorf("invalid redis TLS configuration: %w", err)
+	}
+	return config, nil
 }
 
-func getOptionsSingle(p *properties.Properties) *goredis.Options {
+func getOptionsSingle(p *properties.Properties) (*goredis.Options, error) {
 	opts := &goredis.Options{}
 
 	opts.Addr = p.GetString(redisAddr, redisAddrDefault)
@@ -358,7 +390,13 @@ func getOptionsSingle(p *properties.Properties) *goredis.Options {
 	opts.ReadTimeout = p.GetDuration(redisReadTimeout, time.Second*3)
 	opts.WriteTimeout = p.GetDuration(redisWriteTimeout, opts.ReadTimeout)
 	opts.PoolSize = p.GetInt(redisPoolSize, redisPoolSizeDefault)
+	if opts.PoolSize < 0 {
+		return nil, fmt.Errorf("%s must be >= 0, got %d", redisPoolSize, opts.PoolSize)
+	}
 	threadCount := p.MustGetInt("threadcount")
+	if threadCount <= 0 {
+		return nil, fmt.Errorf("threadcount must be > 0, got %d", threadCount)
+	}
 	if opts.PoolSize == 0 {
 		opts.PoolSize = threadCount
 		fmt.Println(fmt.Sprintf("Setting %s=%d (from <threadcount>) given you haven't specified a value.", redisPoolSize, opts.PoolSize))
@@ -378,12 +416,16 @@ func getOptionsSingle(p *properties.Properties) *goredis.Options {
 	// If d <= 0, connections are not closed due to a connection's idle time.
 	// -1 disables idle timeout check.
 	opts.ConnMaxIdleTime = p.GetDuration(redisIdleTimeout, -1)
-	opts.TLSConfig = parseTLS(p)
+	tlsConfig, err := parseTLS(p)
+	if err != nil {
+		return nil, err
+	}
+	opts.TLSConfig = tlsConfig
 
-	return opts
+	return opts, nil
 }
 
-func getOptionsCluster(p *properties.Properties) *goredis.ClusterOptions {
+func getOptionsCluster(p *properties.Properties) (*goredis.ClusterOptions, error) {
 	opts := &goredis.ClusterOptions{}
 
 	addresses, _ := p.Get(redisAddr)
@@ -401,7 +443,13 @@ func getOptionsCluster(p *properties.Properties) *goredis.ClusterOptions {
 	opts.ReadTimeout = p.GetDuration(redisReadTimeout, time.Second*3)
 	opts.WriteTimeout = p.GetDuration(redisWriteTimeout, opts.ReadTimeout)
 	opts.PoolSize = p.GetInt(redisPoolSize, redisPoolSizeDefault)
+	if opts.PoolSize < 0 {
+		return nil, fmt.Errorf("%s must be >= 0, got %d", redisPoolSize, opts.PoolSize)
+	}
 	threadCount := p.MustGetInt("threadcount")
+	if threadCount <= 0 {
+		return nil, fmt.Errorf("threadcount must be > 0, got %d", threadCount)
+	}
 	if opts.PoolSize == 0 {
 		opts.PoolSize = threadCount
 		fmt.Println(fmt.Sprintf("Setting %s=%d (from <threadcount>) given you haven't specified a value.", redisPoolSize, opts.PoolSize))
@@ -421,9 +469,13 @@ func getOptionsCluster(p *properties.Properties) *goredis.ClusterOptions {
 	// If d <= 0, connections are not closed due to a connection's idle time.
 	// -1 disables idle timeout check.
 	opts.ConnMaxIdleTime = p.GetDuration(redisIdleTimeout, -1)
-	opts.TLSConfig = parseTLS(p)
+	tlsConfig, err := parseTLS(p)
+	if err != nil {
+		return nil, err
+	}
+	opts.TLSConfig = tlsConfig
 
-	return opts
+	return opts, nil
 }
 
 func init() {
