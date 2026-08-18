@@ -1,5 +1,8 @@
 # go-ycsb
 
+[![Docker Pulls](https://img.shields.io/docker/pulls/redis/go-ycsb)](https://hub.docker.com/r/redis/go-ycsb)
+[![CI](https://github.com/redis-performance/go-ycsb/actions/workflows/go.yml/badge.svg)](https://github.com/redis-performance/go-ycsb/actions/workflows/go.yml)
+
 go-ycsb is a Go port of [YCSB](https://github.com/brianfrankcooper/YCSB). It fully supports all YCSB generators and the Core workload so we can do the basic CRUD benchmarks with Go.
 
 ## Why another Go YCSB?
@@ -45,6 +48,17 @@ Notice:
 + Minimum supported go version is 1.16.
 + To use FoundationDB, you must install [client](https://www.foundationdb.org/download/) library at first, now the supported version is 6.2.11.
 + To use RocksDB, you must follow [INSTALL](https://github.com/facebook/rocksdb/blob/master/INSTALL.md) to install RocksDB at first.
+
+## Docker
+
+Pre-built Docker images are available on Docker Hub:
+
+```bash
+docker pull redis/go-ycsb:latest
+docker run --rm redis/go-ycsb --help
+```
+
+Images are built for `linux/amd64` and `linux/arm64`.
 
 ## Usage
 
