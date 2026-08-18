@@ -274,13 +274,16 @@ Common configurations:
 
 |field|default value|description|
 |-|-|-|
-|mongodb.url|"mongodb://127.0.0.1:27017"|MongoDB URI|
+|mongodb.url|"mongodb://127.0.0.1:27017/ycsb?w=1"|MongoDB URI. The database go-ycsb uses is taken from the URI's path segment (e.g. "ycsb" above); it falls back to "ycsb" if the URI has none|
 |mongodb.tls_skip_verify|false|Enable/disable server ca certificate verification|
 |mongodb.tls_ca_file|""|Path to mongodb server ca certificate file|
-|mongodb.namespace|"ycsb.ycsb"|Namespace to use|
 |mongodb.authdb|"admin"|Authentication database|
 |mongodb.username|N/A|Username for authentication|
 |mongodb.password|N/A|Password for authentication|
+|mongodb.write_concern|N/A|Write concern: "majority" or a numeric ack count (e.g. "1", "2")|
+|mongodb.write_concern_journal|false|Also require the write to hit the on-disk journal; combine with mongodb.write_concern=majority for durable/synchronous writes|
+|mongodb.read_concern|N/A|Read concern: "local", "available", "majority", "linearizable", or "snapshot"|
+|mongodb.read_preference|N/A|Read preference: "primary", "primaryPreferred", "secondary", "secondaryPreferred", or "nearest"|
 
 ### Redis
 |field|default value|description|
