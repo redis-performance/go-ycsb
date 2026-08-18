@@ -2,6 +2,7 @@
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/redis/go-ycsb)](https://hub.docker.com/r/redis/go-ycsb)
 [![CI](https://github.com/redis-performance/go-ycsb/actions/workflows/go.yml/badge.svg)](https://github.com/redis-performance/go-ycsb/actions/workflows/go.yml)
+[![Integration](https://github.com/redis-performance/go-ycsb/actions/workflows/integration.yml/badge.svg)](https://github.com/redis-performance/go-ycsb/actions/workflows/integration.yml)
 
 go-ycsb is a Go port of [YCSB](https://github.com/brianfrankcooper/YCSB). It fully supports all YCSB generators and the Core workload so we can do the basic CRUD benchmarks with Go.
 
@@ -96,6 +97,20 @@ Available Commands:
 ./bin/go-ycsb run basic -P workloads/workloada
 ```
 
+### Feature-store workload
+
+`workloads/workload_feature_store` models the entity-major serving layout from the [redis-benchmarks-specification feature-store playbook](https://github.com/redis/redis-benchmarks-specification/blob/main/redis_benchmarks_specification/test-suites/memtier_benchmark-playbook-feature-store-hash-10M-entities-50-features-template.yml): one hash/document per entity (`feature_1`..`feature_50` + a trailing `event_ts` field), whole-entity reads (Redis `HGETALL`, MongoDB `findOne`), whole-row writes (`HSET`/`$set` of every field), a 95:5 read:write mix, and Zipfian-skewed serving traffic. Field values default to realistic typed scalars (numeric mix + a real timestamp) shaped like what [Feast](https://docs.feast.dev/reference/type-system) and [Featureform](https://docs.featureform.com/abstractions/feature) actually store, rather than opaque bytes. It works against `redis` and `mongodb` out of the box:
+
+```bash
+./bin/go-ycsb load redis   -P workloads/workload_feature_store -p redis.addr=127.0.0.1:6379
+./bin/go-ycsb run  redis   -P workloads/workload_feature_store -p redis.addr=127.0.0.1:6379
+
+./bin/go-ycsb load mongodb -P workloads/workload_feature_store -p mongodb.url="mongodb://127.0.0.1:27017/ycsb?w=1"
+./bin/go-ycsb run  mongodb -P workloads/workload_feature_store -p mongodb.url="mongodb://127.0.0.1:27017/ycsb?w=1"
+```
+
+See the comments at the top of `workloads/workload_feature_store` for the full data-shape/command-mix rationale, and the "Field generation" table below for the properties it's built from (`fieldnameprefix`, `fieldvaluetype`, etc.) - those are generic core-workload properties, so they work in any workload file, not just this one.
+
 ## Supported Database
 
 - MySQL / TiDB
@@ -114,6 +129,24 @@ Available Commands:
 - BoltDB
 - etcd
 - DynamoDB
+
+## Field generation
+
+These are core-workload properties (see [Running-a-Workload](https://github.com/brianfrankcooper/YCSB/wiki/Running-a-Workload) for the base set like `fieldcount`/`fieldlength`/`readallfields`); the ones below extend field naming and value content and work in any workload file.
+
+|field|default value|description|
+|-|-|-|
+|fieldlengthminimum|1|Lower bound for `uniform`/`zipfian` fieldlengthdistribution, e.g. to model 8-24 byte values instead of always starting at 1 byte|
+|fieldnameprefix|"field"|Prefix for generated field names (`field0`, `field1`, ...), e.g. `feature_` for `feature_0`, `feature_1`, ...|
+|fieldnamestartindex|0|Starting index for numbered field names, e.g. `1` for `feature_1`..`feature_N` instead of `feature_0`..`feature_(N-1)`|
+|lastfieldname|""|If set, overrides the name of the final generated field - e.g. a trailing `event_ts` metadata column alongside numbered feature fields|
+|fieldvaluetype|"random"|Content of generated field values: `random` (opaque bytes, only size matters), `integer`, `float`, `boolean`, `timestamp` (RFC3339), or `numeric` (a realistic int/float/boolean mix) - see [Feast](https://docs.feast.dev/reference/type-system)/[Featureform](https://docs.featureform.com/abstractions/feature)'s typed scalar columns for the shape this models|
+|lastfieldvaluetype|""|If set, overrides the value type of the final field (see `lastfieldname`), e.g. `timestamp` for a trailing `event_ts` field while numbered feature fields stay `numeric`. Must be set together with `lastfieldname`|
+|fieldvalueintegermin|0|Lower bound for `integer`/`numeric` fieldvaluetype content|
+|fieldvalueintegermax|100000|Upper bound for `integer`/`numeric` fieldvaluetype content, e.g. a bounded count column|
+|fieldvaluefloatmin|0.0|Lower bound for `float`/`numeric` fieldvaluetype content|
+|fieldvaluefloatmax|1.0|Upper bound for `float`/`numeric` fieldvaluetype content, e.g. a rate/score/probability column|
+|fieldvaluefloatprecision|4|Decimal places for `float`/`numeric` fieldvaluetype content, e.g. `0.8472`|
 
 ## Output configuration
 
@@ -353,7 +386,17 @@ Common configurations:
 |dynamodb.consistent.reads|false|Reads on DynamoDB provide an eventually consistent read by default. If your benchmark/use-case requires a strongly consistent read, set this option to true|
 |dynamodb.delete.after.run.stage|false|Detele the database table after the run stage|
 
+## Testing
 
+```bash
+go test ./...
+
+# Feature-store workload load+run against dockerized Redis + MongoDB
+# (starts and tears down its own disposable containers)
+make test-integration-feature-store
+```
+
+The integration test runs in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
 
 ## TODO
 
