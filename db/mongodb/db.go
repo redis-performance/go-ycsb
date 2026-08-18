@@ -4,14 +4,17 @@ package mongodb
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"github.com/pingcap/go-ycsb/pkg/prop"
 	"io/ioutil"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/magiconair/properties"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
@@ -43,9 +46,11 @@ const (
 	// these give durable/synchronous writes instead of the mongodbUrlDefault's w=1.
 	mongodbWriteConcern        = "mongodb.write_concern"
 	mongodbWriteConcernJournal = "mongodb.write_concern_journal"
-	// mongodbReadConcern: "local", "available", "majority", "linearizable", or
-	// "snapshot" - the consistency/durability guarantee of data returned by a
-	// read (e.g. mongodb.read_concern=majority to only read majority-committed data).
+	// mongodbReadConcern: "local", "available", "majority", or "linearizable"
+	// - the consistency/durability guarantee of data returned by a read (e.g.
+	// mongodb.read_concern=majority to only read majority-committed data).
+	// "snapshot" is not offered: it requires a multi-document
+	// transaction/session, which this adapter's Read/Scan never open.
 	mongodbReadConcern = "mongodb.read_concern"
 	// mongodbReadPreference: "primary", "primaryPreferred", "secondary",
 	// "secondaryPreferred", or "nearest" - which replica-set member(s) reads
@@ -53,11 +58,39 @@ const (
 	// preference picks WHERE a read goes, read concern picks HOW committed
 	// the data it returns must be.
 	mongodbReadPreference = "mongodb.read_preference"
+	// mongodbWriteConcernTimeout (wtimeout): how long the server waits for
+	// the configured write concern (e.g. majority) to be satisfied before
+	// giving up. Without it, mongodb.write_concern=majority against a
+	// replica set that can't currently reach a majority (a down/partitioned
+	// secondary) blocks the calling goroutine indefinitely - there is no
+	// other deadline anywhere in the request path.
+	mongodbWriteConcernTimeout = "mongodb.write_concern_timeout"
+	// mongodbSocketTimeout bounds every socket read/write, so a connection
+	// that goes quiet without closing (a NAT/security-group idle-connection
+	// drop, a network partition, a paused VM) fails the operation instead of
+	// hanging the worker goroutine forever.
+	mongodbSocketTimeout = "mongodb.socket_timeout"
 )
+
+// mongoDatabaseNameRe rejects the characters MongoDB forbids in a database
+// name (see https://www.mongodb.com/docs/manual/reference/limits/#naming-restrictions),
+// so a malformed mongodb.url path segment (a stray "//", an unescaped space
+// or dot) is caught here instead of surfacing as an opaque "invalid
+// namespace" error partway through a large load/run.
+var mongoDatabaseNameRe = regexp.MustCompile(`^[^/\\. "$*<>:|?]{1,64}$`)
 
 type mongoDB struct {
 	cli *mongo.Client
 	db  *mongo.Database
+	// unacknowledgedWrites is true when mongodb.write_concern=0: the driver
+	// never waits for (or receives) a server reply for a write, so
+	// InsertOneResult/UpdateResult/DeleteResult are always left at their
+	// zero values - MatchedCount/DeletedCount can no longer be used to
+	// detect a missing key, and a real server-side write failure can no
+	// longer be observed via err either. Both are inherent to w=0, not bugs
+	// in this adapter, so Update/Delete treat "not found" as unknowable
+	// instead of reporting it (wrongly) as a hard failure on every call.
+	unacknowledgedWrites bool
 }
 
 func (m *mongoDB) Close() error {
@@ -113,7 +146,7 @@ func (m *mongoDB) Insert(ctx context.Context, table string, key string, values m
 	for k, v := range values {
 		doc[k] = v
 	}
-	if _, err := m.db.Collection(table).InsertOne(ctx, doc); err != nil {
+	if _, err := m.db.Collection(table).InsertOne(ctx, doc); err != nil && err != mongo.ErrUnacknowledgedWrite {
 		fmt.Println(err)
 		return fmt.Errorf("Insert error: %s", err.Error())
 	}
@@ -123,10 +156,16 @@ func (m *mongoDB) Insert(ctx context.Context, table string, key string, values m
 // Update a document.
 func (m *mongoDB) Update(ctx context.Context, table string, key string, values map[string][]byte) error {
 	res, err := m.db.Collection(table).UpdateOne(ctx, bson.M{"_id": key}, bson.M{"$set": values})
-	if err != nil {
+	// With mongodb.write_concern=0 the driver deliberately returns
+	// ErrUnacknowledgedWrite from every call - by design, an unacknowledged
+	// write can't be confirmed - and res is left zero-valued, not a real
+	// failure. m.unacknowledgedWrites still guards the MatchedCount check
+	// below as a second line of defense in case a future driver version
+	// stops erroring here and starts returning a zero-valued result instead.
+	if err != nil && err != mongo.ErrUnacknowledgedWrite {
 		return fmt.Errorf("Update error: %s", err.Error())
 	}
-	if res.MatchedCount != 1 {
+	if !m.unacknowledgedWrites && res.MatchedCount != 1 {
 		return fmt.Errorf("Update error: %s not found", key)
 	}
 	return nil
@@ -135,10 +174,10 @@ func (m *mongoDB) Update(ctx context.Context, table string, key string, values m
 // Delete a document.
 func (m *mongoDB) Delete(ctx context.Context, table string, key string) error {
 	res, err := m.db.Collection(table).DeleteOne(ctx, bson.M{"_id": key})
-	if err != nil {
+	if err != nil && err != mongo.ErrUnacknowledgedWrite {
 		return fmt.Errorf("Delete error: %s", err.Error())
 	}
-	if res.DeletedCount != 1 {
+	if !m.unacknowledgedWrites && res.DeletedCount != 1 {
 		return fmt.Errorf("Delete error: %s not found", key)
 	}
 	return nil
@@ -161,6 +200,14 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	defer cancel()
 
 	cliOpts := options.Client().ApplyURI(uri)
+	// The driver only populates TLSConfig when the URI itself contains
+	// tls=true/ssl=true; without this, setting mongodb.tls_ca_file or
+	// mongodb.tls_skip_verify alone silently does nothing - the properties
+	// are made self-sufficient here instead of depending on an undocumented
+	// URL flag the operator has no reason to know about.
+	if cliOpts.TLSConfig == nil && (tlsSkipVerify || caFile != "") {
+		cliOpts.TLSConfig = &tls.Config{}
+	}
 	if cliOpts.TLSConfig != nil {
 		if len(connString.Hosts) > 0 {
 			servername := strings.Split(connString.Hosts[0], ":")[0]
@@ -173,14 +220,16 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		}
 
 		if caFile != "" {
-			// Load CA cert
+			// Load CA cert. Returned as an error (not log.Fatal, which would
+			// os.Exit(1) here and skip any cleanup the caller might do)
+			// so a bad cert path fails like any other config error.
 			caCert, err := ioutil.ReadFile(caFile)
 			if err != nil {
-				log.Fatal(err)
+				return nil, fmt.Errorf("failed to read %s: %w", mongodbTLSCAFile, err)
 			}
 			caCertPool := x509.NewCertPool()
 			if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
-				log.Fatalf("certifacte %s could not be parsed", caFile)
+				return nil, fmt.Errorf("%s %q: certificate could not be parsed", mongodbTLSCAFile, caFile)
 			}
 
 			cliOpts.TLSConfig.RootCAs = caCertPool
@@ -189,8 +238,17 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	t := uint64(p.GetInt64(prop.ThreadCount, prop.ThreadCountDefault))
 	cliOpts.SetMaxPoolSize(t)
 
+	if socketTimeout, ok := p.Get(mongodbSocketTimeout); ok {
+		d, err := time.ParseDuration(socketTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s %q: %w", mongodbSocketTimeout, socketTimeout, err)
+		}
+		cliOpts.SetSocketTimeout(d)
+	}
+
 	wc, wcOk := p.Get(mongodbWriteConcern)
 	journal := p.GetBool(mongodbWriteConcernJournal, false)
+	unacknowledgedWrites := false
 	if wcOk || journal {
 		var wcOpts []writeconcern.Option
 		if wcOk {
@@ -201,17 +259,43 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 				if err != nil {
 					return nil, fmt.Errorf("invalid %s %q: must be \"majority\" or an integer ack count", mongodbWriteConcern, wc)
 				}
+				if w == 0 {
+					unacknowledgedWrites = true
+				}
 				wcOpts = append(wcOpts, writeconcern.W(w))
 			}
 		}
 		if journal {
+			if unacknowledgedWrites {
+				return nil, fmt.Errorf("%s=true is incompatible with %s=0 (an unacknowledged write cannot also require a journal ack)", mongodbWriteConcernJournal, mongodbWriteConcern)
+			}
 			wcOpts = append(wcOpts, writeconcern.J(true))
+		}
+		if wcTimeout, ok := p.Get(mongodbWriteConcernTimeout); ok {
+			if unacknowledgedWrites {
+				return nil, fmt.Errorf("%s is incompatible with %s=0 (an unacknowledged write has no server-side wait to time out)", mongodbWriteConcernTimeout, mongodbWriteConcern)
+			}
+			d, err := time.ParseDuration(wcTimeout)
+			if err != nil {
+				return nil, fmt.Errorf("invalid %s %q: %w", mongodbWriteConcernTimeout, wcTimeout, err)
+			}
+			wcOpts = append(wcOpts, writeconcern.WTimeout(d))
 		}
 		cliOpts.SetWriteConcern(writeconcern.New(wcOpts...))
 	}
 
 	if rc, ok := p.Get(mongodbReadConcern); ok {
-		cliOpts.SetReadConcern(readconcern.New(readconcern.Level(strings.ToLower(rc))))
+		// "snapshot" is deliberately not accepted: per the driver's own
+		// readconcern.Snapshot() doc, it is only valid inside a
+		// multi-document transaction/session, and this adapter's Read/Scan
+		// never open one - every read would fail server-side instead of
+		// failing this one config check up front.
+		switch strings.ToLower(rc) {
+		case "local", "available", "majority", "linearizable":
+			cliOpts.SetReadConcern(readconcern.New(readconcern.Level(strings.ToLower(rc))))
+		default:
+			return nil, fmt.Errorf("unknown %s %q: expected local, available, majority, or linearizable", mongodbReadConcern, rc)
+		}
 	}
 
 	if rp, ok := p.Get(mongodbReadPreference); ok {
@@ -243,27 +327,36 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		return nil, errors.New("mongodb.password is set, but mongodb.username is missing")
 	}
 
-	cli, err := mongo.Connect(ctx, cliOpts)
-	if err != nil {
-		return nil, err
-	}
-	if err := cli.Ping(ctx, nil); err != nil {
-		return nil, err
-	}
-	// check if auth passed
-	if _, err := cli.ListDatabaseNames(ctx, map[string]string{}); err != nil {
-		return nil, errors.New("auth failed")
-	}
-
 	dbName := mongodbDatabaseDefault
 	if connString.Database != "" {
 		dbName = connString.Database
 	}
+	if !mongoDatabaseNameRe.MatchString(dbName) {
+		return nil, fmt.Errorf("invalid database name %q resolved from %s: must be 1-64 characters and may not contain / \\ . \" $ * < > : | ? or a space", dbName, mongodbUrl)
+	}
+
+	cli, err := mongo.Connect(ctx, cliOpts)
+	if err != nil {
+		return nil, err
+	}
+	// Ping performs (and thus validates) the full connection handshake,
+	// including authentication - a separate ListDatabaseNames call used to
+	// run here purely to "check auth", but that command needs a cluster-wide
+	// privilege (e.g. clusterMonitor) a normal least-privilege readWrite
+	// service account doesn't have, so it rejected valid credentials and
+	// discarded the real driver error (topology/TLS/auth) behind a fixed
+	// "auth failed" string. Removed: Ping already proves auth works, and any
+	// permission gap the target user genuinely lacks will surface clearly
+	// from the first real Read/Insert/Update/Delete instead.
+	if err := cli.Ping(ctx, nil); err != nil {
+		return nil, err
+	}
 	fmt.Printf("Connected to MongoDB! Using database %q\n", dbName)
 
 	m := &mongoDB{
-		cli: cli,
-		db:  cli.Database(dbName),
+		cli:                  cli,
+		db:                   cli.Database(dbName),
+		unacknowledgedWrites: unacknowledgedWrites,
 	}
 	return m, nil
 }
