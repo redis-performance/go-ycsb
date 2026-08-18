@@ -42,3 +42,9 @@ endif
 check:
 	golint -set_exit_status db/... cmd/... pkg/...
 
+# Runs the feature-store workload's load+run phases against dockerized Redis
+# and MongoDB, failing on any op error or unexpected op count. Same target
+# locally and in CI (see .github/workflows/integration.yml).
+test-integration-feature-store:
+	./test/integration/feature_store.sh
+

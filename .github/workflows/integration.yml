@@ -1,0 +1,29 @@
+name: Integration
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+
+  feature-store:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.20'
+
+      # test/integration/feature_store.sh starts (and tears down) its own
+      # disposable Redis/MongoDB containers, so this is the same command
+      # a developer runs locally via `make test-integration-feature-store`.
+      - name: Feature-store workload vs. dockerized Redis + MongoDB
+        run: make test-integration-feature-store
+        env:
+          RECORDCOUNT: 100000
