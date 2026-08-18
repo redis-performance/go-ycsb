@@ -373,7 +373,11 @@ func (c *core) DoInsert(ctx context.Context, db ycsb.DB) error {
 	var err error
 	for {
 		err = db.Insert(ctx, c.table, dbKey, values)
-		if err != nil {
+		// Inverted here would mean "stop retrying once the insert succeeds,
+		// but keep retrying successful inserts forever" - a real regression
+		// (upstream commit f9c3dce) that shipped for a while; a failed
+		// insert must fall through to the retry-count/backoff logic below.
+		if err == nil {
 			break
 		}
 
@@ -711,6 +715,9 @@ func (coreCreator) Create(p *properties.Properties) (ycsb.Workload, error) {
 	c.p = p
 	c.table = p.GetString(prop.TableName, prop.TableNameDefault)
 	c.fieldCount = p.GetInt64(prop.FieldCount, prop.FieldCountDefault)
+	if c.fieldCount <= 0 {
+		util.Fatalf("%s must be > 0, got %d", prop.FieldCount, c.fieldCount)
+	}
 	fieldNamePrefix := p.GetString(prop.FieldNamePrefix, prop.FieldNamePrefixDefault)
 	fieldNameStartIndex := p.GetInt64(prop.FieldNameStartIndex, prop.FieldNameStartIndexDefault)
 	lastFieldName := p.GetString(prop.LastFieldName, prop.LastFieldNameDefault)
