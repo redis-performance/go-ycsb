@@ -191,9 +191,13 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 
 	fmt.Println("Connected to MongoDB!")
 
+	dbName := mongodbDatabaseDefault
+	if connString.Database != "" {
+		dbName = connString.Database
+	}
 	m := &mongoDB{
 		cli: cli,
-		db:  cli.Database(mongodbDatabaseDefault),
+		db:  cli.Database(dbName),
 	}
 	return m, nil
 }

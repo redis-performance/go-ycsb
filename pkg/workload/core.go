@@ -664,7 +664,14 @@ func (coreCreator) Create(p *properties.Properties) (ycsb.Workload, error) {
 		insertProportion := p.GetFloat64(prop.InsertProportion, prop.InsertProportionDefault)
 		opCount := p.GetInt64(prop.OperationCount, 0)
 		expectedNewKeys := int64(float64(opCount) * insertProportion * 2.0)
-		keyrangeUpperBound = insertStart + insertCount + expectedNewKeys
+		// -1: keyrangeUpperBound is inclusive (matches upstream YCSB's
+		// CoreWorkload#buildKeyChooser). Without it, the chosen key range
+		// extends one past the last key actually loaded/inserted, so the
+		// zipfian key chooser can occasionally pick a key that was never
+		// written - surfaced as spurious "not found" errors on databases
+		// that report a missing key as an error (e.g. mongodb, sql), and
+		// silently as an empty read on databases that don't (e.g. redis).
+		keyrangeUpperBound = insertStart + insertCount + expectedNewKeys - 1
 		c.keyChooser = generator.NewScrambledZipfian(keyrangeLowerBound, keyrangeUpperBound, generator.ZipfianConstant)
 	case "latest":
 		c.keyChooser = generator.NewSkewedLatest(c.transactionInsertKeySequence)
