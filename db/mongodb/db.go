@@ -10,6 +10,7 @@ import (
 	"github.com/pingcap/go-ycsb/pkg/prop"
 	"io/ioutil"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/magiconair/properties"
@@ -17,6 +18,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readconcern"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/connstring"
 )
 
@@ -32,6 +36,23 @@ const (
 	mongodbAuthdbDefault   = "admin"
 	mongodbTLSSkipVerify   = "mongodb.tls_skip_verify"
 	mongodbTLSCAFile       = "mongodb.tls_ca_file"
+
+	// mongodbWriteConcern: "majority" or a numeric ack count (e.g. "1", "2").
+	// mongodbWriteConcernJournal: also require the write to hit the on-disk journal.
+	// Together, e.g. mongodb.write_concern=majority mongodb.write_concern_journal=true,
+	// these give durable/synchronous writes instead of the mongodbUrlDefault's w=1.
+	mongodbWriteConcern        = "mongodb.write_concern"
+	mongodbWriteConcernJournal = "mongodb.write_concern_journal"
+	// mongodbReadConcern: "local", "available", "majority", "linearizable", or
+	// "snapshot" - the consistency/durability guarantee of data returned by a
+	// read (e.g. mongodb.read_concern=majority to only read majority-committed data).
+	mongodbReadConcern = "mongodb.read_concern"
+	// mongodbReadPreference: "primary", "primaryPreferred", "secondary",
+	// "secondaryPreferred", or "nearest" - which replica-set member(s) reads
+	// are routed to. This is a distinct knob from mongodbReadConcern: read
+	// preference picks WHERE a read goes, read concern picks HOW committed
+	// the data it returns must be.
+	mongodbReadPreference = "mongodb.read_preference"
 )
 
 type mongoDB struct {
@@ -167,6 +188,47 @@ func (c mongodbCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	}
 	t := uint64(p.GetInt64(prop.ThreadCount, prop.ThreadCountDefault))
 	cliOpts.SetMaxPoolSize(t)
+
+	if wc, ok := p.Get(mongodbWriteConcern); ok {
+		var wcOpts []writeconcern.Option
+		if strings.EqualFold(wc, "majority") {
+			wcOpts = append(wcOpts, writeconcern.WMajority())
+		} else {
+			w, err := strconv.Atoi(wc)
+			if err != nil {
+				return nil, fmt.Errorf("invalid %s %q: must be \"majority\" or an integer ack count", mongodbWriteConcern, wc)
+			}
+			wcOpts = append(wcOpts, writeconcern.W(w))
+		}
+		if p.GetBool(mongodbWriteConcernJournal, false) {
+			wcOpts = append(wcOpts, writeconcern.J(true))
+		}
+		cliOpts.SetWriteConcern(writeconcern.New(wcOpts...))
+	}
+
+	if rc, ok := p.Get(mongodbReadConcern); ok {
+		cliOpts.SetReadConcern(readconcern.New(readconcern.Level(strings.ToLower(rc))))
+	}
+
+	if rp, ok := p.Get(mongodbReadPreference); ok {
+		var pref *readpref.ReadPref
+		switch strings.ToLower(rp) {
+		case "primary":
+			pref = readpref.Primary()
+		case "primarypreferred":
+			pref = readpref.PrimaryPreferred()
+		case "secondary":
+			pref = readpref.Secondary()
+		case "secondarypreferred":
+			pref = readpref.SecondaryPreferred()
+		case "nearest":
+			pref = readpref.Nearest()
+		default:
+			return nil, fmt.Errorf("unknown %s %q: expected primary, primaryPreferred, secondary, secondaryPreferred, or nearest", mongodbReadPreference, rp)
+		}
+		cliOpts.SetReadPreference(pref)
+	}
+
 	username, usrExist := p.Get(mongodbUsername)
 	password, pwdExist := p.Get(mongodbPassword)
 	if usrExist && pwdExist {
