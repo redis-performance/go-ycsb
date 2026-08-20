@@ -17,7 +17,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"strings"
 	"time"
 
@@ -31,14 +35,16 @@ import (
 
 // cassandra properties
 const (
-	cassandraCluster       = "cassandra.cluster"
-	cassandraKeyspace      = "cassandra.keyspace"
-	cassandraConnections   = "cassandra.connections"
-	cassandraUsername      = "cassandra.username"
-	cassandraPassword      = "cassandra.password"
-	cassandraTLS           = "cassandra.tls"
-	cassandraTLSCA         = "cassandra.tls.ca"
-	cassandraTLSSkipVerify = "cassandra.tls.skip.verify"
+	cassandraCluster                     = "cassandra.cluster"
+	cassandraKeyspace                    = "cassandra.keyspace"
+	cassandraConnections                 = "cassandra.connections"
+	cassandraUsername                    = "cassandra.username"
+	cassandraPassword                    = "cassandra.password"
+	cassandraTLS                         = "cassandra.tls"
+	cassandraTLSCA                       = "cassandra.tls.ca"
+	cassandraTLSSkipVerify               = "cassandra.tls.skip.verify"
+	cassandraTLSDisableHostLookup        = "cassandra.tls.disable_host_lookup"
+	cassandraTLSDisableHostLookupDefault = true
 
 	cassandraUsernameDefault    = "cassandra"
 	cassandraPasswordDefault    = "cassandra"
@@ -46,6 +52,75 @@ const (
 	cassandraKeyspaceDefault    = "test"
 	cassandraConnectionsDefault = 2 // refer to https://github.com/gocql/gocql/blob/master/cluster.go#L52
 )
+
+// newCassandraTLSConfig builds a tls.Config that verifies the server's
+// certificate CHAIN but deliberately not its hostname - managed/SNI-proxied
+// clusters (ScyllaDB Cloud confirmed) are dialed via explicit host:port pairs
+// (see DisableInitialHostLookup above) whose address doesn't necessarily
+// match the certificate's SAN, so standard hostname verification would
+// reject a perfectly valid connection.
+//
+// This can NOT be expressed via gocql.SslOptions.EnableHostVerification: the
+// vendored gocql version's setupTLSConfig() does
+// `sslOpts.InsecureSkipVerify = !sslOpts.EnableHostVerification` right before
+// dialing, which - since SslOptions embeds *tls.Config, so this assignment
+// IS tls.Config.InsecureSkipVerify - means EnableHostVerification is really
+// an all-or-nothing "run Go's normal chain+hostname check, or skip
+// verification entirely" toggle, not a way to run chain-only verification.
+// (An earlier version of this code never set EnableHostVerification at all,
+// which left InsecureSkipVerify permanently forced to true - TLS encrypted
+// the connection but authenticated nothing, silently.)
+//
+// Instead this sets InsecureSkipVerify true (satisfying gocql's own toggle,
+// whatever EnableHostVerification ends up being) and supplies a custom
+// VerifyPeerCertificate, which Go's crypto/tls still calls even with
+// InsecureSkipVerify set - see the InsecureSkipVerify doc comment on
+// crypto/tls.Config. That callback does the real chain verification
+// ourselves, against either the CA in cassandra.tls.ca or (if unset) the
+// system trust store, without ever checking the hostname.
+func newCassandraTLSConfig(p *properties.Properties) (*tls.Config, error) {
+	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+
+	if p.GetBool(cassandraTLSSkipVerify, false) {
+		log.Printf("%s=true: TLS certificate verification is disabled for this connection\n", cassandraTLSSkipVerify)
+		return tlsConfig, nil
+	}
+
+	roots := x509.NewCertPool()
+	if caPath := p.GetString(cassandraTLSCA, ""); caPath != "" {
+		pem, err := ioutil.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read %s: %w", cassandraTLSCA, err)
+		}
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("%s %q: certificate could not be parsed", cassandraTLSCA, caPath)
+		}
+	} else if systemRoots, err := x509.SystemCertPool(); err == nil && systemRoots != nil {
+		roots = systemRoots
+	}
+
+	tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return errors.New("cassandra: no certificate presented by server")
+		}
+		certs := make([]*x509.Certificate, len(rawCerts))
+		intermediates := x509.NewCertPool()
+		for i, raw := range rawCerts {
+			cert, err := x509.ParseCertificate(raw)
+			if err != nil {
+				return fmt.Errorf("cassandra: failed to parse server certificate: %w", err)
+			}
+			certs[i] = cert
+			if i > 0 {
+				intermediates.AddCert(cert)
+			}
+		}
+		_, err := certs[0].Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates})
+		return err
+	}
+
+	return tlsConfig, nil
+}
 
 type cassandraCreator struct {
 }
@@ -89,21 +164,13 @@ func (c cassandraCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	// TLS support — not present upstream. ScyllaDB Cloud (and most managed
 	// Cassandra-protocol services) enforce TLS 1.3 client-to-node with no
 	// plaintext option, so this is required to connect at all, not optional
-	// hardening. Same verify-CA-not-hostname model used elsewhere in this
-	// project (Shaka's self-signed certs, redis.tls_insecure_skip_verify)
-	// rather than full hostname verification, since node DNS names in a
-	// managed cluster can be less stable than the CA itself.
+	// hardening.
 	if p.GetBool(cassandraTLS, false) {
-		sslOpts := &gocql.SslOptions{
-			Config: &tls.Config{},
+		tlsConfig, err := newCassandraTLSConfig(p)
+		if err != nil {
+			return nil, err
 		}
-		if caPath := p.GetString(cassandraTLSCA, ""); caPath != "" {
-			sslOpts.CaPath = caPath
-		}
-		if p.GetBool(cassandraTLSSkipVerify, false) {
-			sslOpts.Config.InsecureSkipVerify = true
-		}
-		cluster.SslOpts = sslOpts
+		cluster.SslOpts = &gocql.SslOptions{Config: tlsConfig}
 
 		// Managed/SNI-proxied clusters (ScyllaDB Cloud confirmed; likely any
 		// similar managed CQL-over-TLS proxy) expose TLS on a distinct port
@@ -113,8 +180,10 @@ func (c cassandraCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		// TLS port, then tries every OTHER discovered peer on the plaintext
 		// port and fails ("tls: first record does not look like a TLS
 		// handshake"). Disabling discovery and relying entirely on the
-		// explicit host:port list in cassandra.cluster sidesteps that.
-		cluster.DisableInitialHostLookup = true
+		// explicit host:port list in cassandra.cluster sidesteps that -
+		// self-managed clusters that serve TLS on the same port throughout
+		// don't need this and can opt out via cassandra.tls.disable_host_lookup=false.
+		cluster.DisableInitialHostLookup = p.GetBool(cassandraTLSDisableHostLookup, cassandraTLSDisableHostLookupDefault)
 	}
 
 	session, err := cluster.CreateSession()
