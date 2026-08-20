@@ -48,3 +48,11 @@ check:
 test-integration-feature-store:
 	./test/integration/feature_store.sh
 
+# Runs db/cassandra/db.go's TLS support against a dockerized, TLS-enabled
+# ScyllaDB node, asserting both that a connection using the correct CA
+# succeeds AND that one using an unrelated CA is rejected - the second
+# assertion is what catches a TLS config that encrypts but never actually
+# verifies the server. Same target locally and in CI.
+test-integration-cassandra-tls:
+	./test/integration/cassandra_tls.sh
+

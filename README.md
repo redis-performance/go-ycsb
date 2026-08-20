@@ -302,6 +302,14 @@ Common configurations:
 |cassandra.connections|2|Number of connections per host|
 |cassandra.username|cassandra|Username|
 |cassandra.password|cassandra|Password|
+|cassandra.tls|false|Enable a TLS connection to the cluster. Required for ScyllaDB Cloud and most managed Cassandra-protocol services, which enforce TLS with no plaintext option|
+|cassandra.tls.ca|""|Path to a PEM-encoded CA certificate to verify the server's certificate CHAIN against (not its hostname - see below). If unset, falls back to the system trust store|
+|cassandra.tls.skip.verify|false|Skip TLS certificate verification entirely (insecure; for local/self-signed testing only)|
+|cassandra.tls.disable_host_lookup|true|Disable gocql's automatic ring discovery when TLS is enabled (see below). Set to false for a self-managed cluster that serves TLS on the same port throughout and doesn't need this|
+
+Notes:
+- `cassandra.tls.ca` verifies the certificate **chain** but deliberately not the **hostname**: managed/SNI-proxied clusters (ScyllaDB Cloud confirmed) are dialed via explicit `host:port` pairs whose address doesn't necessarily match the certificate's SAN, so standard hostname verification would reject a perfectly valid connection. This can't be expressed as a simple boolean in the underlying gocql library, so this adapter supplies its own certificate-chain verification instead of relying on gocql's all-or-nothing verify/don't-verify toggle - see the comment above `newCassandraTLSConfig` in `db/cassandra/db.go` for the full mechanism.
+- When `cassandra.tls=true`, `cassandra.tls.disable_host_lookup` defaults to `true`. Managed/SNI-proxied clusters (confirmed on ScyllaDB Cloud) expose CQL-over-TLS on a distinct port from the plaintext native port reported back by `system.peers`/`system.local` during gocql's automatic ring discovery — without disabling that discovery, the driver connects fine to the first seed host on the TLS port, then tries every *other* discovered peer on the plaintext port and fails. Pass every node as an explicit `host:port` pair in `cassandra.cluster` when using TLS with the default. If you're instead connecting to a self-managed cluster that serves TLS uniformly, set `cassandra.tls.disable_host_lookup=false` to keep automatic node discovery.
 
 ### MongoDB
 
@@ -396,9 +404,15 @@ go test ./...
 # Feature-store workload load+run against dockerized Redis + MongoDB
 # (starts and tears down its own disposable containers)
 make test-integration-feature-store
+
+# Cassandra TLS support against a dockerized, TLS-enabled ScyllaDB node -
+# asserts a connection with the correct CA succeeds AND one with an
+# unrelated CA is rejected, since the latter is what catches a TLS setup
+# that encrypts but never actually verifies the server
+make test-integration-cassandra-tls
 ```
 
-The integration test runs in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
+Both integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
 
 ## TODO
 
