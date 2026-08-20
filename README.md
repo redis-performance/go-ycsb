@@ -302,6 +302,18 @@ Common configurations:
 |cassandra.connections|2|Number of connections per host|
 |cassandra.username|cassandra|Username|
 |cassandra.password|cassandra|Password|
+|cassandra.tls|false|Enable a TLS connection to the cluster. Required for ScyllaDB Cloud and most managed Cassandra-protocol services, which enforce TLS with no plaintext option|
+|cassandra.tls.ca|""|Path to a PEM-encoded CA certificate to verify the server against. Verifies the CA chain but not the hostname (matches the model most managed clusters expect, since node DNS names can be less stable than the CA)|
+|cassandra.tls.skip.verify|false|Skip TLS certificate verification entirely (insecure; for local/self-signed testing only)|
+
+Note: when `cassandra.tls=true`, this driver also sets gocql's
+`DisableInitialHostLookup`. Managed/SNI-proxied clusters (confirmed on
+ScyllaDB Cloud) expose CQL-over-TLS on a distinct port from the plaintext
+native port reported back by `system.peers`/`system.local` during gocql's
+automatic ring discovery — without disabling that discovery, the driver
+connects fine to the first seed host on the TLS port, then tries every
+*other* discovered peer on the plaintext port and fails. Pass every node
+as an explicit `host:port` pair in `cassandra.cluster` when using TLS.
 
 ### MongoDB
 

@@ -16,6 +16,7 @@ package cassandra
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"strings"
 	"time"
@@ -30,11 +31,14 @@ import (
 
 // cassandra properties
 const (
-	cassandraCluster     = "cassandra.cluster"
-	cassandraKeyspace    = "cassandra.keyspace"
-	cassandraConnections = "cassandra.connections"
-	cassandraUsername    = "cassandra.username"
-	cassandraPassword    = "cassandra.password"
+	cassandraCluster       = "cassandra.cluster"
+	cassandraKeyspace      = "cassandra.keyspace"
+	cassandraConnections   = "cassandra.connections"
+	cassandraUsername      = "cassandra.username"
+	cassandraPassword      = "cassandra.password"
+	cassandraTLS           = "cassandra.tls"
+	cassandraTLSCA         = "cassandra.tls.ca"
+	cassandraTLSSkipVerify = "cassandra.tls.skip.verify"
 
 	cassandraUsernameDefault    = "cassandra"
 	cassandraPasswordDefault    = "cassandra"
@@ -81,6 +85,37 @@ func (c cassandraCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	username := p.GetString(cassandraUsername, cassandraUsernameDefault)
 	password := p.GetString(cassandraPassword, cassandraPasswordDefault)
 	cluster.Authenticator = gocql.PasswordAuthenticator{Username: username, Password: password}
+
+	// TLS support — not present upstream. ScyllaDB Cloud (and most managed
+	// Cassandra-protocol services) enforce TLS 1.3 client-to-node with no
+	// plaintext option, so this is required to connect at all, not optional
+	// hardening. Same verify-CA-not-hostname model used elsewhere in this
+	// project (Shaka's self-signed certs, redis.tls_insecure_skip_verify)
+	// rather than full hostname verification, since node DNS names in a
+	// managed cluster can be less stable than the CA itself.
+	if p.GetBool(cassandraTLS, false) {
+		sslOpts := &gocql.SslOptions{
+			Config: &tls.Config{},
+		}
+		if caPath := p.GetString(cassandraTLSCA, ""); caPath != "" {
+			sslOpts.CaPath = caPath
+		}
+		if p.GetBool(cassandraTLSSkipVerify, false) {
+			sslOpts.Config.InsecureSkipVerify = true
+		}
+		cluster.SslOpts = sslOpts
+
+		// Managed/SNI-proxied clusters (ScyllaDB Cloud confirmed; likely any
+		// similar managed CQL-over-TLS proxy) expose TLS on a distinct port
+		// (e.g. 9142) from the plaintext native port (9042) reported back in
+		// system.peers/system.local during gocql's automatic ring discovery.
+		// Without this, gocql connects fine to the first seed host on the
+		// TLS port, then tries every OTHER discovered peer on the plaintext
+		// port and fails ("tls: first record does not look like a TLS
+		// handshake"). Disabling discovery and relying entirely on the
+		// explicit host:port list in cassandra.cluster sidesteps that.
+		cluster.DisableInitialHostLookup = true
+	}
 
 	session, err := cluster.CreateSession()
 	if err != nil {
