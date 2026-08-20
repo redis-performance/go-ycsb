@@ -13,3 +13,4 @@ tool/tool
 
 # hdr-plot output format
 *.png
+.cassandra-tls-it
