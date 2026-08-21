@@ -2,9 +2,14 @@ package aerospike
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"io/ioutil"
+	"log"
 
-	as "github.com/aerospike/aerospike-client-go"
+	as "github.com/aerospike/aerospike-client-go/v7"
 	"github.com/magiconair/properties"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
 )
@@ -13,6 +18,25 @@ const (
 	asNs   = "aerospike.ns"
 	asHost = "aerospike.host"
 	asPort = "aerospike.port"
+
+	// asTLS enables a TLS connection to the server. Required for Aerospike
+	// Cloud/Enterprise deployments that enforce TLS.
+	asTLS = "aerospike.tls"
+	// asTLSCA is a path to a PEM-encoded CA certificate to verify the
+	// server's certificate against. If unset, falls back to the system
+	// trust store.
+	asTLSCA = "aerospike.tls.ca"
+	// asTLSSkipVerify disables certificate verification entirely (insecure;
+	// for local/self-signed testing only).
+	asTLSSkipVerify = "aerospike.tls.skip.verify"
+	// asTLSName is the TLS certificate name (Aerospike's "tls-name") the
+	// server's certificate is registered under - distinct from
+	// aerospike.host, since a managed/cloud deployment's connect address
+	// doesn't necessarily match what the certificate was issued for. The
+	// client uses this both as the TLS ServerName and, unlike a bare
+	// tls.Config, as an explicit post-handshake hostname check (see
+	// aerospike-client-go's Connection.initTLSIfNeeded).
+	asTLSName = "aerospike.tls.name"
 )
 
 type aerospikedb struct {
@@ -66,8 +90,9 @@ func (adb *aerospikedb) Read(ctx context.Context, table string, key string, fiel
 // count: The number of records to read.
 // fields: The list of fields to read, nil|empty for reading all.
 func (adb *aerospikedb) Scan(ctx context.Context, table string, startKey string, count int, fields []string) ([]map[string][]byte, error) {
+	// MaxConcurrentNodes defaults to 0, meaning "all nodes in parallel" -
+	// same behavior the old ConcurrentNodes=true boolean requested.
 	policy := as.NewScanPolicy()
-	policy.ConcurrentNodes = true
 	recordset, err := adb.client.ScanAll(policy, adb.ns, table)
 	if err != nil {
 		return nil, err
@@ -163,11 +188,53 @@ func (adb *aerospikedb) Delete(ctx context.Context, table string, key string) er
 
 type aerospikeCreator struct{}
 
+// newAerospikeTLSConfig builds the tls.Config for aerospike.tls=true.
+// Unlike gocql (see db/cassandra/db.go), aerospike-client-go uses a plain
+// *tls.Config as-is - it clones it, sets ServerName from the Host's
+// TLSName, and (when TLSName is non-empty and InsecureSkipVerify is false)
+// performs its own additional hostname check via VerifyHostname. So a
+// standard tls.Config with RootCAs/InsecureSkipVerify set does exactly what
+// it looks like it does here, no custom VerifyPeerCertificate workaround
+// needed.
+func newAerospikeTLSConfig(p *properties.Properties) (*tls.Config, error) {
+	if p.GetBool(asTLSSkipVerify, false) {
+		log.Printf("%s=true: TLS certificate verification is disabled for this connection\n", asTLSSkipVerify)
+		return &tls.Config{InsecureSkipVerify: true}, nil
+	}
+
+	tlsConfig := &tls.Config{}
+	if caPath := p.GetString(asTLSCA, ""); caPath != "" {
+		pem, err := ioutil.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read %s: %w", asTLSCA, err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("%s %q: certificate could not be parsed", asTLSCA, caPath)
+		}
+		tlsConfig.RootCAs = roots
+	}
+	return tlsConfig, nil
+}
+
 func (a aerospikeCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	adb := &aerospikedb{}
 	adb.ns = p.GetString(asNs, "test")
+
+	host := as.NewHost(p.GetString(asHost, "localhost"), p.GetInt(asPort, 3000))
+	policy := as.NewClientPolicy()
+
+	if p.GetBool(asTLS, false) {
+		tlsConfig, err := newAerospikeTLSConfig(p)
+		if err != nil {
+			return nil, err
+		}
+		policy.TlsConfig = tlsConfig
+		host.TLSName = p.GetString(asTLSName, "")
+	}
+
 	var err error
-	adb.client, err = as.NewClient(p.GetString(asHost, "localhost"), p.GetInt(asPort, 3000))
+	adb.client, err = as.NewClientWithPolicyAndHost(policy, host)
 	return adb, err
 }
 
