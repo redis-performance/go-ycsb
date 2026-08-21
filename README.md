@@ -218,6 +218,12 @@ Common configurations:
 |aerospike.host|"localhost"|The port of the Aerospike service|
 |aerospike.port|3000|The port of the Aerospike service|
 |aerospike.ns|"test"|The namespace to use|
+|aerospike.tls|false|Enable a TLS connection to the cluster. Required for Aerospike Cloud/Enterprise deployments that enforce TLS|
+|aerospike.tls.ca|""|Path to a PEM-encoded CA certificate to verify the server's certificate against. If unset, falls back to the system trust store|
+|aerospike.tls.skip.verify|false|Skip TLS certificate verification entirely (insecure; for local/self-signed testing only)|
+|aerospike.tls.name|""|The TLS certificate name (Aerospike's "tls-name") the server's certificate is registered under - distinct from `aerospike.host`, since a managed/cloud deployment's connect address doesn't necessarily match what the certificate was issued for|
+
+Note: `aerospike-client-go`'s TLS handling is more predictable than gocql's (see the Cassandra section above) - it uses the configured `*tls.Config` as-is, so `aerospike.tls.ca`/`aerospike.tls.skip.verify` behave exactly as they read, no extra workaround needed.
 
 ### Badger
 
@@ -410,9 +416,14 @@ make test-integration-feature-store
 # unrelated CA is rejected, since the latter is what catches a TLS setup
 # that encrypts but never actually verifies the server
 make test-integration-cassandra-tls
+
+# Aerospike TLS support against dockerized Aerospike (Community Edition has
+# no native TLS of its own, so this goes through a TLS-terminating proxy)
+# - same correct-CA/wrong-CA assertions as the cassandra test above
+make test-integration-aerospike-tls
 ```
 
-Both integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
+All three integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
 
 ## TODO
 

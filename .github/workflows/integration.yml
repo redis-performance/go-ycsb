@@ -46,3 +46,22 @@ jobs:
       # `make test-integration-cassandra-tls`.
       - name: Cassandra TLS support vs. dockerized ScyllaDB
         run: make test-integration-cassandra-tls
+
+  aerospike-tls:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.20'
+
+      # test/integration/aerospike_tls.sh starts (and tears down) its own
+      # disposable Aerospike Community Edition container plus a TLS-
+      # terminating proxy and a throwaway CA/cert set, so this is the same
+      # command a developer runs locally via `make test-integration-aerospike-tls`.
+      - name: Aerospike TLS support vs. dockerized Aerospike
+        run: make test-integration-aerospike-tls
