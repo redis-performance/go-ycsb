@@ -56,3 +56,12 @@ test-integration-feature-store:
 test-integration-cassandra-tls:
 	./test/integration/cassandra_tls.sh
 
+# Runs db/aerospike/db.go's TLS support against a dockerized Aerospike
+# Community Edition node behind a TLS-terminating proxy (Community Edition
+# has no native TLS support of its own - it's Enterprise-only), asserting
+# on connection outcome: the correct CA connects, an unrelated CA is
+# rejected, and skip.verify explicitly bypasses that rejection. Same target
+# locally and in CI.
+test-integration-aerospike-tls:
+	./test/integration/aerospike_tls.sh
+
