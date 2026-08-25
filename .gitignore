@@ -15,3 +15,5 @@ tool/tool
 *.png
 .cassandra-tls-it
 .aerospike-tls-it
+.couchbase-it
+.env
