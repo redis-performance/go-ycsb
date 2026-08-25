@@ -1,6 +1,7 @@
 package couchbase
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/magiconair/properties"
@@ -93,6 +94,41 @@ func TestFieldPathSafe(t *testing.T) {
 		t.Run(tt.field, func(t *testing.T) {
 			if got := fieldPathSafe.MatchString(tt.field); got != tt.safe {
 				t.Fatalf("fieldPathSafe.MatchString(%q) = %v, want %v", tt.field, got, tt.safe)
+			}
+		})
+	}
+}
+
+// TestCanUseSubdocUpdate covers Update()'s actual branch-selection logic
+// (not just the fieldPathSafe regexp in isolation): the integration test
+// exercises this end to end against a real server, but a regression here -
+// an inverted condition, a dropped check - would otherwise only surface as
+// silently-broken updates for real users with an unusual field name.
+func TestCanUseSubdocUpdate(t *testing.T) {
+	safeFields := func(n int) map[string][]byte {
+		values := make(map[string][]byte, n)
+		for i := 0; i < n; i++ {
+			values[fmt.Sprintf("field%d", i)] = []byte("v")
+		}
+		return values
+	}
+
+	tests := []struct {
+		name   string
+		values map[string][]byte
+		want   bool
+	}{
+		{"empty", map[string][]byte{}, true},
+		{"single safe field", map[string][]byte{"field0": []byte("v")}, true},
+		{"single unsafe field", map[string][]byte{"event.ts": []byte("v")}, false},
+		{"mixed safe and unsafe", map[string][]byte{"field0": []byte("v"), "a.b": []byte("v")}, false},
+		{"exactly at the subdoc cap, all safe", safeFields(couchbaseMaxSubdocOps), true},
+		{"one over the subdoc cap, all safe", safeFields(couchbaseMaxSubdocOps + 1), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := canUseSubdocUpdate(tt.values); got != tt.want {
+				t.Fatalf("canUseSubdocUpdate(%d fields) = %v, want %v", len(tt.values), got, tt.want)
 			}
 		})
 	}

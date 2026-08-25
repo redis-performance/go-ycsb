@@ -62,6 +62,15 @@ const (
 	couchbaseScanTimeout        = "couchbase.scan_timeout"
 	couchbaseScanTimeoutDefault = 30 * time.Second
 
+	// couchbaseScanGraceWindow bounds how long Scan waits on resultCh alone,
+	// after scanCtx's deadline fires, before giving up on a result that may
+	// have completed at essentially the same instant (see Scan's doc
+	// comment and its use below) and falling back to force-closing a
+	// *ScanResult via resHandle instead. Deliberately short: it only needs
+	// to cover the gap between col.Scan() returning and the goroutine's
+	// very next line sending on resHandle/resultCh, not any real scan work.
+	couchbaseScanGraceWindow = 200 * time.Millisecond
+
 	// couchbaseAutoCreateCollection: when true (default), a table name not
 	// yet present as a collection under couchbase.scope is created on first
 	// use instead of failing every op with "collection not found". Every
@@ -365,24 +374,36 @@ func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, 
 		}
 		return r.docs, nil
 	case <-scanCtx.Done():
-		// A grace window, not a non-blocking check: col.Scan() returning and
-		// the goroutine's very next line sending on resHandle are separated
-		// by only a few CPU instructions, but Go's select gives no ordering
-		// guarantee against a concurrent goroutine - a non-blocking receive
-		// here could lose that race and miss a *ScanResult that in fact
-		// exists, permanently reintroducing the leak this handoff exists to
-		// prevent. This wait is bounded (unlike blocking on resHandle with
-		// no timeout at all) so the col.Scan()-itself-still-wedged case
-		// (nothing ever sent, see the doc comment above) still can't hang
-		// this call indefinitely.
+		// resultCh gets strict priority, via a dedicated grace-window wait -
+		// not raced against resHandle in one select. col.Scan() returning
+		// and the goroutine's very next line sending on resHandle are
+		// separated by only a few CPU instructions, so a real result can
+		// still land on resultCh microseconds after scanCtx's deadline
+		// fires; but Go's select makes no ordering guarantee among
+		// simultaneously-ready cases (uniform pseudo-random choice per the
+		// language spec), so an earlier version of this method that raced
+		// resultCh against resHandle in a single select could, roughly half
+		// the time, discard an already-completed result (or a real
+		// non-timeout error) and report a spurious timeout instead - a real,
+		// reproducible bug this two-step structure exists to close. Only
+		// once this dedicated wait comes up empty do we fall back to
+		// resHandle, to force-close a *ScanResult that col.Scan() already
+		// obtained so its draining goroutine isn't left blocked forever.
+		select {
+		case r := <-resultCh:
+			if r.err != nil {
+				return nil, fmt.Errorf("Scan error: %s", r.err.Error())
+			}
+			return r.docs, nil
+		case <-time.After(couchbaseScanGraceWindow):
+		}
 		select {
 		case res := <-resHandle:
 			closeRes(res)
-		case r := <-resultCh:
-			if r.err == nil {
-				return r.docs, nil
-			}
-		case <-time.After(200 * time.Millisecond):
+		default:
+			// Nothing was ever sent: col.Scan() itself is still the thing
+			// wedged (no *ScanResult obtained yet), which this method
+			// cannot force-unblock - see the doc comment above.
 		}
 		if errors.Is(scanCtx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("Scan error: timed out after %s: %w", scanTimeout, scanCtx.Err())
@@ -449,6 +470,23 @@ const couchbaseUpdateCasRetries = 5
 // actually uses.
 var fieldPathSafe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
+// canUseSubdocUpdate reports whether values is small enough (see
+// couchbaseMaxSubdocOps) and every field name safe enough (see
+// fieldPathSafe) to write via a single atomic MutateIn call. A pure
+// function - not inlined into Update - so this branch-selection logic can
+// be unit-tested directly without a live Couchbase connection.
+func canUseSubdocUpdate(values map[string][]byte) bool {
+	if len(values) > couchbaseMaxSubdocOps {
+		return false
+	}
+	for field := range values {
+		if !fieldPathSafe.MatchString(field) {
+			return false
+		}
+	}
+	return true
+}
+
 // Update a document. Per the ycsb.DB interface contract, Update must merge
 // values into the existing document - fields not mentioned must survive
 // untouched - not replace the document wholesale. For a values map within
@@ -476,17 +514,7 @@ func (db *couchbaseDB) Update(ctx context.Context, table string, key string, val
 		return err
 	}
 
-	canUseSubdoc := len(values) <= couchbaseMaxSubdocOps
-	if canUseSubdoc {
-		for field := range values {
-			if !fieldPathSafe.MatchString(field) {
-				canUseSubdoc = false
-				break
-			}
-		}
-	}
-
-	if canUseSubdoc {
+	if canUseSubdocUpdate(values) {
 		specs := make([]gocb.MutateInSpec, 0, len(values))
 		for field, value := range values {
 			specs = append(specs, gocb.UpsertSpec(field, value, nil))

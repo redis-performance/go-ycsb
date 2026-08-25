@@ -212,4 +212,23 @@ OUT=$(run_phase run workloads/workload_template -p table=usertable -p couchbase.
 echo "$OUT" | tail -5
 check_output "$OUT" TOTAL 1000
 
+# Exercises Update()'s fieldPathSafe-driven fallback to Get+merge+Replace
+# (db/couchbase/db.go) end to end: a dotted field name isn't safe to use as
+# a Couchbase subdocument path (MutateIn's fast path would otherwise parse
+# "event.ts" as nested field "ts" inside object "event"), so this must route
+# through the CAS-protected fallback instead and still succeed cleanly. Unit
+# tests only cover the regexp in isolation; this is what actually catches a
+# regression in the branch-selection logic itself.
+echo "==> [unsafe field name] load+run with lastfieldname=event.ts (exercises Update's fieldPathSafe fallback)"
+OUT=$(run_phase load workloads/workload_template -p table=dottedfieldtest -p fieldcount=3 \
+  -p lastfieldname=event.ts -p lastfieldvaluetype=timestamp -p fieldvaluetype=numeric \
+  -p recordcount=1000 -p operationcount=1000)
+echo "$OUT" | tail -5
+check_output "$OUT" INSERT 1000
+OUT=$(run_phase run workloads/workload_template -p table=dottedfieldtest -p fieldcount=3 \
+  -p lastfieldname=event.ts -p lastfieldvaluetype=timestamp -p fieldvaluetype=numeric \
+  -p recordcount=1000 -p operationcount=1000 -p readproportion=0 -p updateproportion=1)
+echo "$OUT" | tail -5
+check_output "$OUT" TOTAL 1000
+
 echo "==> couchbase integration test passed"
