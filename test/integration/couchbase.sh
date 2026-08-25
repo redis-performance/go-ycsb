@@ -231,4 +231,82 @@ OUT=$(run_phase run workloads/workload_template -p table=dottedfieldtest -p fiel
 echo "$OUT" | tail -5
 check_output "$OUT" TOTAL 1000
 
+# go-ycsb's built-in dataintegrity mechanism verifies every field VALUE
+# returned by Read is byte-exact what was written - real, valuable coverage,
+# but note what it does NOT catch: verifyRow (pkg/workload/core.go) only
+# checks fields actually present in a Read's result map, so it would not by
+# itself have caught round 2's bug (Update silently dropping every
+# unmentioned field) - a document missing fields still passes verifyRow for
+# whichever fields survived. See the dedicated field-count check below for
+# that regression specifically. dataintegrity requires
+# fieldlengthdistribution=constant (go-ycsb's own requirement, since the
+# deterministic value's length must be reproducible without replaying the
+# load phase's exact RNG sequence).
+echo "==> [dataintegrity] Read/Update must return byte-exact deterministic field values"
+OUT=$(run_phase load workloads/workload_template -p table=ditest -p dataintegrity=true \
+  -p fieldlengthdistribution=constant -p fieldlength=20 -p recordcount=2000 -p operationcount=2000)
+echo "$OUT" | tail -5
+check_output "$OUT" INSERT 2000
+OUT=$(run_phase run workloads/workload_template -p table=ditest -p dataintegrity=true \
+  -p fieldlengthdistribution=constant -p fieldlength=20 -p recordcount=2000 -p operationcount=6000 \
+  -p readallfields=true)
+echo "$OUT" | tail -5
+check_output "$OUT" TOTAL 6000
+
+# Direct regression guard for round 2's data-corruption bug specifically
+# (Update() used to call a full-document Replace with only the updated
+# field(s), silently destroying every other field): load a single document,
+# hammer it with single-field Updates, then read the raw stored document
+# back via cbc (bypassing this adapter's own Read entirely, so a bug in Read
+# masking a bug in Update can't hide this) and assert every original field
+# is still present.
+echo "==> [field preservation] Update() must not drop fields it wasn't asked to change"
+FC_TABLE=fieldpreservetest
+FC_FIELDCOUNT=10
+OUT=$(run_phase load workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_FIELDCOUNT" \
+  -p insertorder=ordered -p recordcount=1 -p operationcount=1 -p threadcount=1)
+echo "$OUT" | tail -5
+check_output "$OUT" INSERT 1
+OUT=$(run_phase run workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_FIELDCOUNT" \
+  -p insertorder=ordered -p recordcount=1 -p operationcount=30 -p threadcount=1 \
+  -p readproportion=0 -p updateproportion=1)
+echo "$OUT" | tail -5
+check_output "$OUT" TOTAL 30
+
+got_fields=$(docker exec "$CONTAINER" cbc cat user0 -u "$COUCHBASE_USER" -P "$COUCHBASE_PASS" \
+  -U "couchbase://127.0.0.1/${COUCHBASE_BUCKET}" --collection "$FC_TABLE" 2>/dev/null \
+  | grep '^{' | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+if [ "$got_fields" != "$FC_FIELDCOUNT" ]; then
+  echo "FAIL: expected all $FC_FIELDCOUNT fields to survive 30 single-field updates, found $got_fields"
+  exit 1
+fi
+echo "OK: all $FC_FIELDCOUNT fields survived 30 single-field updates"
+
+# Scan's scanCtx.Done() timeout path (the grace-window wait on resultCh, the
+# resHandle force-close fallback) has produced three real, confirmed bugs
+# across rounds 2-4 of review, entirely because nothing exercised it: the
+# "Scan smoke test" above never times out against a healthy local server.
+# Forcing couchbase.scan_timeout absurdly low makes every scan take that
+# path for real, asserting it fails cleanly (SCAN_ERROR, not a hang or a
+# panic) instead of only being checked by inspection.
+echo "==> [scan timeout] couchbase.scan_timeout=1ms forces Scan's timeout path - must fail cleanly, not hang"
+set +e
+OUT=$(run_phase run workloads/workload_template -p table=usertable \
+  -p recordcount="$RECORDCOUNT" -p operationcount=20 -p threadcount=1 \
+  -p readproportion=0 -p updateproportion=0 -p scanproportion=1 -p maxscanlength=10 \
+  -p couchbase.scan_timeout=1ms 2>&1)
+STATUS=$?
+set -e
+if [ "$STATUS" -ne 0 ]; then
+  echo "FAIL: run phase exited non-zero ($STATUS) - expected go-ycsb to complete cleanly and report SCAN_ERROR ops, not crash or hang:"
+  echo "$OUT"
+  exit 1
+fi
+if ! echo "$OUT" | grep -q 'SCAN_ERROR'; then
+  echo "FAIL: expected couchbase.scan_timeout=1ms to force at least one SCAN_ERROR (exercising Scan's timeout path), got:"
+  echo "$OUT"
+  exit 1
+fi
+echo "OK: scan_timeout=1ms correctly forced the timeout path (SCAN_ERROR present), process completed without hanging"
+
 echo "==> couchbase integration test passed"

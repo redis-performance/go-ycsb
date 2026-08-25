@@ -75,3 +75,13 @@ test-integration-aerospike-tls:
 test-integration-couchbase:
 	./test/integration/couchbase.sh
 
+# Unit tests for db/couchbase specifically (not `go test ./...` - this repo
+# doesn't run that in CI repo-wide, see CONTRIBUTING.md - but these guard
+# real, previously-shipped bugs found by adversarial review: a silent
+# plaintext-TLS downgrade, a subdocument-path field-name injection, and
+# Update's branch-selection logic) so they run alongside the Docker
+# integration test on every push/PR instead of only if a contributor
+# remembers to run them locally.
+test-couchbase:
+	go test ./db/couchbase/...
+

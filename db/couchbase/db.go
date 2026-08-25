@@ -624,6 +624,19 @@ func (c couchbaseCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	password := p.GetString(couchbasePassword, couchbasePasswordDefault)
 	bucketName := p.GetString(couchbaseBucket, couchbaseBucketDefault)
 	scope := p.GetString(couchbaseScope, couchbaseScopeDefault)
+	if scope == "" {
+		// magiconair/properties' GetString only falls back to the given
+		// default when the key is entirely absent - an explicitly empty
+		// value (-p couchbase.scope=) is returned as "", not
+		// couchbaseScopeDefault. gocb itself treats "" as an alias for the
+		// default scope elsewhere (Collection.isDefault()), but this
+		// adapter's own default-scope check elsewhere compares against the
+		// literal "_default", so without this normalization an explicitly
+		// empty scope would call CreateScope("") on every first use - which
+		// gocb rejects outright (not as ErrScopeExists) - and every
+		// Read/Scan/Insert/Update/Delete would fail permanently.
+		scope = couchbaseScopeDefault
+	}
 	autoCreate := p.GetBool(couchbaseAutoCreateCollection, couchbaseAutoCreateCollectionDefault)
 
 	durability, err := parseDurability(p)
