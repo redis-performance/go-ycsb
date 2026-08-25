@@ -114,14 +114,16 @@ func (db *couchbaseDB) CleanupThread(ctx context.Context) {
 // getCollection resolves table to a *gocb.Collection, creating the scope and
 // collection on first use if they don't exist yet and couchbaseAutoCreateCollection
 // is set. Results are cached in db.collections: CollectionsV2().CreateCollection is a
-// management-plane call and must not run on every op.
-func (db *couchbaseDB) getCollection(table string) (*gocb.Collection, error) {
+// management-plane call and must not run on every op. ctx is the caller's
+// per-op context - only used on a cache miss (ensureCollection's management
+// calls and readiness probe), since a cache hit does no I/O at all.
+func (db *couchbaseDB) getCollection(ctx context.Context, table string) (*gocb.Collection, error) {
 	if v, ok := db.collections.Load(table); ok {
 		return v.(*gocb.Collection), nil
 	}
 
 	if db.autoCreateCollection {
-		if err := db.ensureCollection(table); err != nil {
+		if err := db.ensureCollection(ctx, table); err != nil {
 			return nil, err
 		}
 	}
@@ -136,31 +138,67 @@ func (db *couchbaseDB) getCollection(table string) (*gocb.Collection, error) {
 // management-plane call and the KV routing manifest on each node picks it up
 // asynchronously, so an op sent immediately after creation can still fail
 // with ErrCollectionNotFound for a short window.
-func (db *couchbaseDB) ensureCollection(table string) error {
+//
+// gocb dispatches each management HTTP request to a randomly chosen cluster
+// node, independently per call - so on a real multi-node cluster, the
+// CreateCollection call below can land on a different node than the
+// CreateScope call just above it, one that hasn't yet replicated the new
+// scope, and get back ErrScopeNotFound even though the scope now genuinely
+// exists. That's retried the same way ErrCollectionNotFound is retried in
+// the readiness probe below, rather than treated as fatal.
+func (db *couchbaseDB) ensureCollection(ctx context.Context, table string) error {
 	mgr := db.bucket.CollectionsV2()
+	deadline := time.Now().Add(15 * time.Second)
 
 	if db.scope != couchbaseScopeDefault {
-		if err := mgr.CreateScope(db.scope, nil); err != nil && !errors.Is(err, gocb.ErrScopeExists) {
+		if err := mgr.CreateScope(db.scope, &gocb.CreateScopeOptions{Context: ctx}); err != nil && !errors.Is(err, gocb.ErrScopeExists) {
 			return fmt.Errorf("couchbase: failed to create scope %q (grant Manage Collections, or pre-create it): %w", db.scope, err)
 		}
 	}
 
-	if err := mgr.CreateCollection(db.scope, table, nil, nil); err != nil && !errors.Is(err, gocb.ErrCollectionExists) {
+	for {
+		err := mgr.CreateCollection(db.scope, table, nil, &gocb.CreateCollectionOptions{Context: ctx})
+		if err == nil || errors.Is(err, gocb.ErrCollectionExists) {
+			break
+		}
+		if errors.Is(err, gocb.ErrScopeNotFound) && time.Now().Before(deadline) {
+			if waitErr := sleepOrDone(ctx, 200*time.Millisecond); waitErr != nil {
+				return waitErr
+			}
+			continue
+		}
 		return fmt.Errorf("couchbase: failed to create collection %q.%q (grant Manage Collections, or pre-create it, or set %s=false): %w", db.scope, table, couchbaseAutoCreateCollection, err)
 	}
 
 	col := db.bucket.Scope(db.scope).Collection(table)
 	probeKey := "__go-ycsb_collection_ready_probe__"
-	deadline := time.Now().Add(15 * time.Second)
 	for {
-		_, err := col.Exists(probeKey, nil)
-		if err == nil || !errors.Is(err, gocb.ErrCollectionNotFound) {
+		_, err := col.Exists(probeKey, &gocb.ExistsOptions{Context: ctx})
+		if err == nil {
 			return nil
+		}
+		if !errors.Is(err, gocb.ErrCollectionNotFound) {
+			return fmt.Errorf("couchbase: checking readiness of collection %q.%q: %w", db.scope, table, err)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("couchbase: collection %q.%q was created but did not become ready within 15s", db.scope, table)
 		}
-		time.Sleep(200 * time.Millisecond)
+		if waitErr := sleepOrDone(ctx, 200*time.Millisecond); waitErr != nil {
+			return waitErr
+		}
+	}
+}
+
+// sleepOrDone waits out d, or returns ctx's error early if ctx is cancelled
+// first - used by ensureCollection's retry loops so a cancelled caller
+// context (e.g. go-ycsb shutting down on SIGINT) doesn't leave a worker
+// goroutine sleeping through the loop's full 15s deadline regardless.
+func sleepOrDone(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
 	}
 }
 
@@ -168,7 +206,7 @@ func (db *couchbaseDB) ensureCollection(table string) error {
 // subdocument projection caps out at 16 paths, well under the feature-store
 // workload's 50 fields, so a plain full-document Get is used instead.
 func (db *couchbaseDB) Read(ctx context.Context, table string, key string, fields []string) (map[string][]byte, error) {
-	col, err := db.getCollection(table)
+	col, err := db.getCollection(ctx, table)
 	if err != nil {
 		return nil, err
 	}
@@ -213,14 +251,31 @@ func (db *couchbaseDB) Read(ctx context.Context, table string, key string, field
 // that safe on the caller's behalf, only bound how long a stuck call can
 // block one worker goroutine for (see below).
 //
-// The result stream is drained in a separate goroutine, bounded by
-// scanCtx's own deadline via a select - not just gocb's ScanOptions.Timeout,
-// which the misbehavior above showed isn't sufficient by itself.
-// res.Close() forces a stalled Next() to unblock once scanCtx's deadline
-// fires; the result channel is buffered so that goroutine can still exit and
-// report even though nothing is listening anymore.
+// Both col.Scan() itself AND the result-stream draining run inside a single
+// background goroutine, raced against scanCtx's own deadline via a select -
+// not just gocb's ScanOptions.Timeout, which the misbehavior above showed
+// isn't sufficient by itself. col.Scan() has to be inside that goroutine,
+// not just the draining loop after it: gocb's rangeScanOpManager applies the
+// caller's context/deadline only to the very first internal request that
+// creates the scan stream, then deliberately switches to context.Background()
+// for every subsequent request needed to fetch results - including the ones
+// producing the first item col.Scan() itself blocks on before it can even
+// return a *ScanResult. A stall in one of those later requests is therefore
+// invisible to scanCtx and can block col.Scan() itself forever - so if this
+// goroutine only started after col.Scan() returned, that call could still
+// hang the calling worker goroutine indefinitely, defeating the whole point
+// of this method having a timeout at all.
+//
+// This can only bound how long the CALLING goroutine blocks, not the spawned
+// one: if col.Scan() itself is the thing wedged (no *ScanResult exists yet),
+// there is no handle for this method to call Close() on to force it to
+// unblock, so on that specific timeout path the background goroutine leaks
+// permanently, still blocked inside gocb. That's an accepted, documented
+// consequence of a real gap in gocb's own cancellation model, not something
+// fixable purely from this side of the client - see the note on Scan
+// concurrency in the README's Couchbase section.
 func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, count int, fields []string) ([]map[string][]byte, error) {
-	col, err := db.getCollection(table)
+	col, err := db.getCollection(ctx, table)
 	if err != nil {
 		return nil, err
 	}
@@ -233,11 +288,6 @@ func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, 
 		From: &gocb.ScanTerm{Term: startKey},
 		To:   gocb.ScanTermMaximum(),
 	}
-	res, err := col.Scan(scanType, &gocb.ScanOptions{Timeout: scanTimeout, Context: scanCtx})
-	if err != nil {
-		return nil, fmt.Errorf("Scan error: %s", err.Error())
-	}
-	defer res.Close()
 
 	type scanResult struct {
 		docs []map[string][]byte
@@ -245,6 +295,13 @@ func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, 
 	}
 	resultCh := make(chan scanResult, 1)
 	go func() {
+		res, err := col.Scan(scanType, &gocb.ScanOptions{Timeout: scanTimeout, Context: scanCtx})
+		if err != nil {
+			resultCh <- scanResult{err: err}
+			return
+		}
+		defer res.Close()
+
 		docs := make([]map[string][]byte, 0, count)
 		for len(docs) < count {
 			item := res.Next()
@@ -277,7 +334,7 @@ func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, 
 		}
 		return r.docs, nil
 	case <-scanCtx.Done():
-		return nil, fmt.Errorf("Scan error: timed out draining scan results after %s: %w", scanTimeout, scanCtx.Err())
+		return nil, fmt.Errorf("Scan error: timed out after %s: %w", scanTimeout, scanCtx.Err())
 	}
 }
 
@@ -285,7 +342,7 @@ func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, 
 // duplicate key during the load phase surfaces as ErrDocumentExists instead
 // of silently overwriting, mirroring the other adapters' Insert semantics.
 func (db *couchbaseDB) Insert(ctx context.Context, table string, key string, values map[string][]byte) error {
-	col, err := db.getCollection(table)
+	col, err := db.getCollection(ctx, table)
 	if err != nil {
 		return err
 	}
@@ -303,7 +360,7 @@ func (db *couchbaseDB) Insert(ctx context.Context, table string, key string, val
 // Update a document. Uses Replace, which fails with ErrDocumentNotFound
 // against a missing key instead of silently creating one.
 func (db *couchbaseDB) Update(ctx context.Context, table string, key string, values map[string][]byte) error {
-	col, err := db.getCollection(table)
+	col, err := db.getCollection(ctx, table)
 	if err != nil {
 		return err
 	}
@@ -320,7 +377,7 @@ func (db *couchbaseDB) Update(ctx context.Context, table string, key string, val
 
 // Delete a document.
 func (db *couchbaseDB) Delete(ctx context.Context, table string, key string) error {
-	col, err := db.getCollection(table)
+	col, err := db.getCollection(ctx, table)
 	if err != nil {
 		return err
 	}
@@ -392,6 +449,17 @@ func (c couchbaseCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	// the common case - couchbase.tls_ca_file/tls_skip_verify exist for a
 	// self-managed cluster's private CA or, for skip_verify, local testing
 	// against a TLS-terminating proxy the way db/aerospike's test does.
+	//
+	// gocb only ever consults SecurityConfig.TLSSkipVerify/TLSRootCAs when
+	// the connection string's scheme itself requests TLS (couchbases://) -
+	// there is no independent option to force it on. Without this check, an
+	// operator who sets couchbase.tls_ca_file but leaves
+	// couchbase.connection_string at the plain couchbase:// default (or
+	// mistypes it) gets a silent, unencrypted connection: the CA file is
+	// read, parsed, and then simply never used, with no error or log line.
+	if (tlsSkipVerify || caFile != "") && !strings.HasPrefix(connStr, "couchbases://") {
+		return nil, fmt.Errorf("%s/%s requires a couchbases:// connection string (TLS) - %s is %q", couchbaseTLSSkipVerify, couchbaseTLSCAFile, couchbaseConnectionString, connStr)
+	}
 	if tlsSkipVerify {
 		opts.SecurityConfig.TLSSkipVerify = true
 	}
@@ -414,6 +482,12 @@ func (c couchbaseCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 
 	bucket := cluster.Bucket(bucketName)
 	if err := bucket.WaitUntilReady(15*time.Second, nil); err != nil {
+		// Connect() already established the connection manager's background
+		// goroutines/sockets by this point; without Close() here, a failed
+		// WaitUntilReady (wrong bucket name, not yet provisioned, a
+		// transient hiccup) leaks them for the life of the process, since
+		// `cluster` is a local variable nothing else can ever reach again.
+		cluster.Close(nil)
 		return nil, fmt.Errorf("couchbase: bucket %q not ready (does it exist?): %w", bucketName, err)
 	}
 	fmt.Printf("Connected to Couchbase! Using bucket %q, scope %q\n", bucketName, scope)
