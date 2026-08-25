@@ -65,3 +65,23 @@ test-integration-cassandra-tls:
 test-integration-aerospike-tls:
 	./test/integration/aerospike_tls.sh
 
+# Runs db/couchbase/db.go's core and feature-store load+run phases, plus a
+# Scan smoke test and an auto_create_collection=false negative check, against
+# a dockerized Couchbase Community Edition node. Same target locally and in
+# CI. The adapter's TLS path (couchbases://, for Capella) has no CE
+# equivalent to test in CI - Community Edition has no native TLS - and was
+# instead verified by hand against a live Capella cluster; see the PR
+# description that introduced this adapter for that verification.
+test-integration-couchbase:
+	./test/integration/couchbase.sh
+
+# Unit tests for db/couchbase specifically (not `go test ./...` - this repo
+# doesn't run that in CI repo-wide, see CONTRIBUTING.md - but these guard
+# real, previously-shipped bugs found by adversarial review: a silent
+# plaintext-TLS downgrade, a subdocument-path field-name injection, and
+# Update's branch-selection logic) so they run alongside the Docker
+# integration test on every push/PR instead of only if a contributor
+# remembers to run them locally.
+test-couchbase:
+	go test ./db/couchbase/...
+

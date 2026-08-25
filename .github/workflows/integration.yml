@@ -18,7 +18,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.20'
+          go-version: '1.24'
 
       # test/integration/feature_store.sh starts (and tears down) its own
       # disposable Redis/MongoDB containers, so this is the same command
@@ -38,7 +38,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.20'
+          go-version: '1.24'
 
       # test/integration/cassandra_tls.sh starts (and tears down) its own
       # disposable, TLS-enabled ScyllaDB container plus a throwaway CA/cert
@@ -57,7 +57,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.20'
+          go-version: '1.24'
 
       # test/integration/aerospike_tls.sh starts (and tears down) its own
       # disposable Aerospike Community Edition container plus a TLS-
@@ -65,3 +65,31 @@ jobs:
       # command a developer runs locally via `make test-integration-aerospike-tls`.
       - name: Aerospike TLS support vs. dockerized Aerospike
         run: make test-integration-aerospike-tls
+
+  couchbase:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+
+      # Network-free unit tests (TLS-scheme validation, subdocument-path
+      # field-name safety, Update's branch-selection logic) - this repo
+      # doesn't run `go test ./...` in CI (see CONTRIBUTING.md), so these
+      # would otherwise never run automatically at all.
+      - name: Couchbase adapter unit tests
+        run: make test-couchbase
+
+      # test/integration/couchbase.sh starts (and tears down, and initializes
+      # via the management REST API) its own disposable Couchbase Community
+      # Edition container, so this is the same command a developer runs
+      # locally via `make test-integration-couchbase`.
+      - name: Couchbase adapter vs. dockerized Couchbase Community Edition
+        run: make test-integration-couchbase
+        env:
+          RECORDCOUNT: 20000
