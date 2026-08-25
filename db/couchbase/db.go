@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -179,7 +180,7 @@ func (db *couchbaseDB) ensureCollection(ctx context.Context, table string) error
 		}
 		if errors.Is(err, gocb.ErrScopeNotFound) && time.Now().Before(createDeadline) {
 			if waitErr := sleepOrDone(ctx, 200*time.Millisecond); waitErr != nil {
-				return waitErr
+				return fmt.Errorf("couchbase: waiting to retry creating collection %q.%q: %w", db.scope, table, waitErr)
 			}
 			continue
 		}
@@ -201,7 +202,7 @@ func (db *couchbaseDB) ensureCollection(ctx context.Context, table string) error
 			return fmt.Errorf("couchbase: collection %q.%q was created but did not become ready within %s", db.scope, table, couchbaseCollectionOpTimeout)
 		}
 		if waitErr := sleepOrDone(ctx, 200*time.Millisecond); waitErr != nil {
-			return waitErr
+			return fmt.Errorf("couchbase: waiting for collection %q.%q to become ready: %w", db.scope, table, waitErr)
 		}
 	}
 }
@@ -364,12 +365,35 @@ func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, 
 		}
 		return r.docs, nil
 	case <-scanCtx.Done():
+		// A grace window, not a non-blocking check: col.Scan() returning and
+		// the goroutine's very next line sending on resHandle are separated
+		// by only a few CPU instructions, but Go's select gives no ordering
+		// guarantee against a concurrent goroutine - a non-blocking receive
+		// here could lose that race and miss a *ScanResult that in fact
+		// exists, permanently reintroducing the leak this handoff exists to
+		// prevent. This wait is bounded (unlike blocking on resHandle with
+		// no timeout at all) so the col.Scan()-itself-still-wedged case
+		// (nothing ever sent, see the doc comment above) still can't hang
+		// this call indefinitely.
 		select {
 		case res := <-resHandle:
 			closeRes(res)
-		default:
+		case r := <-resultCh:
+			if r.err == nil {
+				return r.docs, nil
+			}
+		case <-time.After(200 * time.Millisecond):
 		}
-		return nil, fmt.Errorf("Scan error: timed out after %s: %w", scanTimeout, scanCtx.Err())
+		if errors.Is(scanCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("Scan error: timed out after %s: %w", scanTimeout, scanCtx.Err())
+		}
+		// scanCtx is a child of the caller's ctx (via context.WithTimeout),
+		// so its Done() also fires when the CALLER's context is canceled
+		// (e.g. go-ycsb shutting down on SIGINT) - not only on scan_timeout
+		// expiring. Reporting that as "timed out" would send an operator
+		// chasing a nonexistent scan-performance problem after an ordinary
+		// shutdown.
+		return nil, fmt.Errorf("Scan error: canceled: %w", scanCtx.Err())
 	}
 }
 
@@ -407,32 +431,62 @@ const couchbaseMaxSubdocOps = 16
 // conflict as a real error.
 const couchbaseUpdateCasRetries = 5
 
+// fieldPathSafe matches field names safe to use as-is as a Couchbase
+// subdocument path (MutateIn/UpsertSpec). Couchbase's subdocument path
+// syntax treats '.' as nested-object descent and '['/']' as array indexing -
+// not literal characters - so a field name containing any of those would be
+// parsed as addressing a completely different location than the flat,
+// literal top-level key Insert/Read/Scan treat it as. Path syntax does
+// support backtick-escaping a segment to force it literal, but getting that
+// escaping exactly right - including a field name that itself contains a
+// backtick - is easy to get subtly wrong, so this adapter simply declines to
+// use the fast MutateIn path for a field name that would need it, falling
+// back to the always-correct (if slower) Get+merge+Replace path instead.
+// go-ycsb's own field names (fieldnameprefix/lastfieldname) are
+// user-configurable and not restricted to this pattern, so this check is a
+// real safety net, not a formality - it costs nothing for the plain
+// fieldN/event_ts-style names every one of this repo's own workload files
+// actually uses.
+var fieldPathSafe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
 // Update a document. Per the ycsb.DB interface contract, Update must merge
 // values into the existing document - fields not mentioned must survive
-// untouched - not replace the document wholesale. For values within
-// Couchbase's per-request subdocument op limit (the common case - see
-// couchbaseMaxSubdocOps), this is done atomically and in one round trip via
-// MutateIn/UpsertSpec, one spec per field: each spec sets exactly that
-// top-level field, leaving every other field alone, with no read-modify-write
-// race window.
+// untouched - not replace the document wholesale. For a values map within
+// Couchbase's per-request subdocument op limit (see couchbaseMaxSubdocOps)
+// whose field names are all safe to use as subdocument paths (see
+// fieldPathSafe) - the common case - this is done atomically and in one
+// round trip via MutateIn/UpsertSpec, one spec per field: each spec sets
+// exactly that top-level field, leaving every other field alone, with no
+// read-modify-write race window.
 //
-// For a wider values map (reachable in practice - see couchbaseMaxSubdocOps),
-// it falls back to Get+merge+Replace, using the Get's CAS to detect a
-// concurrent write landing in between rather than silently losing it. A
-// worker retries this loop up to couchbaseUpdateCasRetries times on
-// ErrCasMismatch before giving up: with go-ycsb's own hotspot/zipfian key
-// distributions (the whole point of which is concentrating access onto a
-// small set of keys) and enough worker threads, two Updates landing on the
-// same key at nearly the same time is an expected, not exceptional,
-// occurrence - surfacing the first collision as a hard error, instead of
-// retrying, would turn normal contention into spurious UPDATE_ERROR noise.
+// Otherwise (a wider values map - reachable in practice, see
+// couchbaseMaxSubdocOps - or an unsafe field name), it falls back to
+// Get+merge+Replace, using the Get's CAS to detect a concurrent write
+// landing in between rather than silently losing it. A worker retries this
+// loop up to couchbaseUpdateCasRetries times on ErrCasMismatch before giving
+// up: with go-ycsb's own hotspot/zipfian key distributions (the whole point
+// of which is concentrating access onto a small set of keys) and enough
+// worker threads, two Updates landing on the same key at nearly the same
+// time is an expected, not exceptional, occurrence - surfacing the first
+// collision as a hard error, instead of retrying, would turn normal
+// contention into spurious UPDATE_ERROR noise.
 func (db *couchbaseDB) Update(ctx context.Context, table string, key string, values map[string][]byte) error {
 	col, err := db.getCollection(ctx, table)
 	if err != nil {
 		return err
 	}
 
-	if len(values) <= couchbaseMaxSubdocOps {
+	canUseSubdoc := len(values) <= couchbaseMaxSubdocOps
+	if canUseSubdoc {
+		for field := range values {
+			if !fieldPathSafe.MatchString(field) {
+				canUseSubdoc = false
+				break
+			}
+		}
+	}
+
+	if canUseSubdoc {
 		specs := make([]gocb.MutateInSpec, 0, len(values))
 		for field, value := range values {
 			specs = append(specs, gocb.UpsertSpec(field, value, nil))

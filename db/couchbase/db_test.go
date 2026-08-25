@@ -65,3 +65,35 @@ func TestValidateTLSScheme(t *testing.T) {
 		})
 	}
 }
+
+// TestFieldPathSafe guards the fix for a real bug found by adversarial
+// review: Update()'s MutateIn fast path used a field name directly as a
+// Couchbase subdocument path, where '.'/'['/']' address nested/array
+// locations instead of being literal characters - silently breaking updates
+// for any field name containing them (e.g. a fieldnameprefix or
+// lastfieldname value with a dot), while Insert/Read treat the identical
+// name as an opaque literal key. Anything this regexp doesn't match must
+// fall back to the always-correct Get+merge+Replace path instead.
+func TestFieldPathSafe(t *testing.T) {
+	tests := []struct {
+		field string
+		safe  bool
+	}{
+		{"field0", true},
+		{"field49", true},
+		{"event_ts", true},
+		{"FieldName", true},
+		{"a.0", false},
+		{"event.ts", false},
+		{"field[0]", false},
+		{"a.b.c", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			if got := fieldPathSafe.MatchString(tt.field); got != tt.safe {
+				t.Fatalf("fieldPathSafe.MatchString(%q) = %v, want %v", tt.field, got, tt.safe)
+			}
+		})
+	}
+}
