@@ -146,22 +146,38 @@ func (db *couchbaseDB) getCollection(ctx context.Context, table string) (*gocb.C
 // scope, and get back ErrScopeNotFound even though the scope now genuinely
 // exists. That's retried the same way ErrCollectionNotFound is retried in
 // the readiness probe below, rather than treated as fatal.
+
+// couchbaseCollectionOpTimeout bounds ensureCollection's two independent
+// phases - (1) creating the scope/collection, retrying through a transient
+// ErrScopeNotFound race, and (2) waiting for that collection to become
+// KV-usable - AND bounds each individual gocb call within them. Each phase
+// gets its own full budget computed fresh when that phase starts: sharing
+// one deadline between them meant a slow phase 1 could leave phase 2 with
+// only a sliver of time and produce a spurious "not ready" failure on a
+// collection that had, in fact, just been created successfully. Passing
+// this as each call's own Timeout (not just Context) matters too: without
+// it, a single slow CreateScope/CreateCollection call could block for up to
+// gocb's 75s management-request default - go-ycsb's per-op ctx carries no
+// deadline of its own to cut that short - five times longer than the budget
+// this constant and the code around it otherwise document and assume.
+const couchbaseCollectionOpTimeout = 15 * time.Second
+
 func (db *couchbaseDB) ensureCollection(ctx context.Context, table string) error {
 	mgr := db.bucket.CollectionsV2()
-	deadline := time.Now().Add(15 * time.Second)
 
 	if db.scope != couchbaseScopeDefault {
-		if err := mgr.CreateScope(db.scope, &gocb.CreateScopeOptions{Context: ctx}); err != nil && !errors.Is(err, gocb.ErrScopeExists) {
+		if err := mgr.CreateScope(db.scope, &gocb.CreateScopeOptions{Timeout: couchbaseCollectionOpTimeout, Context: ctx}); err != nil && !errors.Is(err, gocb.ErrScopeExists) {
 			return fmt.Errorf("couchbase: failed to create scope %q (grant Manage Collections, or pre-create it): %w", db.scope, err)
 		}
 	}
 
+	createDeadline := time.Now().Add(couchbaseCollectionOpTimeout)
 	for {
-		err := mgr.CreateCollection(db.scope, table, nil, &gocb.CreateCollectionOptions{Context: ctx})
+		err := mgr.CreateCollection(db.scope, table, nil, &gocb.CreateCollectionOptions{Timeout: couchbaseCollectionOpTimeout, Context: ctx})
 		if err == nil || errors.Is(err, gocb.ErrCollectionExists) {
 			break
 		}
-		if errors.Is(err, gocb.ErrScopeNotFound) && time.Now().Before(deadline) {
+		if errors.Is(err, gocb.ErrScopeNotFound) && time.Now().Before(createDeadline) {
 			if waitErr := sleepOrDone(ctx, 200*time.Millisecond); waitErr != nil {
 				return waitErr
 			}
@@ -172,16 +188,17 @@ func (db *couchbaseDB) ensureCollection(ctx context.Context, table string) error
 
 	col := db.bucket.Scope(db.scope).Collection(table)
 	probeKey := "__go-ycsb_collection_ready_probe__"
+	readyDeadline := time.Now().Add(couchbaseCollectionOpTimeout)
 	for {
-		_, err := col.Exists(probeKey, &gocb.ExistsOptions{Context: ctx})
+		_, err := col.Exists(probeKey, &gocb.ExistsOptions{Timeout: couchbaseCollectionOpTimeout, Context: ctx})
 		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, gocb.ErrCollectionNotFound) {
 			return fmt.Errorf("couchbase: checking readiness of collection %q.%q: %w", db.scope, table, err)
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("couchbase: collection %q.%q was created but did not become ready within 15s", db.scope, table)
+		if time.Now().After(readyDeadline) {
+			return fmt.Errorf("couchbase: collection %q.%q was created but did not become ready within %s", db.scope, table, couchbaseCollectionOpTimeout)
 		}
 		if waitErr := sleepOrDone(ctx, 200*time.Millisecond); waitErr != nil {
 			return waitErr
@@ -260,20 +277,28 @@ func (db *couchbaseDB) Read(ctx context.Context, table string, key string, field
 // creates the scan stream, then deliberately switches to context.Background()
 // for every subsequent request needed to fetch results - including the ones
 // producing the first item col.Scan() itself blocks on before it can even
-// return a *ScanResult. A stall in one of those later requests is therefore
-// invisible to scanCtx and can block col.Scan() itself forever - so if this
-// goroutine only started after col.Scan() returned, that call could still
-// hang the calling worker goroutine indefinitely, defeating the whole point
-// of this method having a timeout at all.
+// return a *ScanResult, and the ones a stuck res.Next() further down is
+// waiting on too. scanCtx alone therefore cannot stop either a stuck
+// col.Scan() or a stuck res.Next() - the only thing that can is calling
+// Close() on the *gocb.ScanResult itself, which is why this method hands
+// that value back out of the goroutine over resHandle the moment it exists,
+// so the timeout path below can reach in and force it closed instead of
+// only being able to time out its own wait.
 //
-// This can only bound how long the CALLING goroutine blocks, not the spawned
-// one: if col.Scan() itself is the thing wedged (no *ScanResult exists yet),
-// there is no handle for this method to call Close() on to force it to
-// unblock, so on that specific timeout path the background goroutine leaks
-// permanently, still blocked inside gocb. That's an accepted, documented
-// consequence of a real gap in gocb's own cancellation model, not something
-// fixable purely from this side of the client - see the note on Scan
-// concurrency in the README's Couchbase section.
+// closeRes/closeOnce exist because that value can now be closed from two
+// places - the goroutine's own deferred cleanup, and the timeout path
+// forcing it shut - and gocb's Close() is not documented as safe to call
+// twice.
+//
+// This can only bound how long the CALLING goroutine blocks, not the
+// spawned one: if col.Scan() itself is still the thing wedged (no
+// *ScanResult obtained yet, so nothing was ever sent on resHandle), there is
+// still no handle for this method to force closed, so on that specific
+// narrower timeout path the background goroutine leaks permanently, still
+// blocked inside gocb. That's an accepted, documented consequence of a real
+// gap in gocb's own cancellation model, not something fixable purely from
+// this side of the client - see the note on Scan concurrency in the
+// README's Couchbase section.
 func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, count int, fields []string) ([]map[string][]byte, error) {
 	col, err := db.getCollection(ctx, table)
 	if err != nil {
@@ -294,13 +319,18 @@ func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, 
 		err  error
 	}
 	resultCh := make(chan scanResult, 1)
+	resHandle := make(chan *gocb.ScanResult, 1)
+	var closeOnce sync.Once
+	closeRes := func(res *gocb.ScanResult) { closeOnce.Do(func() { res.Close() }) }
+
 	go func() {
 		res, err := col.Scan(scanType, &gocb.ScanOptions{Timeout: scanTimeout, Context: scanCtx})
 		if err != nil {
 			resultCh <- scanResult{err: err}
 			return
 		}
-		defer res.Close()
+		resHandle <- res
+		defer closeRes(res)
 
 		docs := make([]map[string][]byte, 0, count)
 		for len(docs) < count {
@@ -334,6 +364,11 @@ func (db *couchbaseDB) Scan(ctx context.Context, table string, startKey string, 
 		}
 		return r.docs, nil
 	case <-scanCtx.Done():
+		select {
+		case res := <-resHandle:
+			closeRes(res)
+		default:
+		}
 		return nil, fmt.Errorf("Scan error: timed out after %s: %w", scanTimeout, scanCtx.Err())
 	}
 }
@@ -357,22 +392,93 @@ func (db *couchbaseDB) Insert(ctx context.Context, table string, key string, val
 	return nil
 }
 
-// Update a document. Uses Replace, which fails with ErrDocumentNotFound
-// against a missing key instead of silently creating one.
+// couchbaseMaxSubdocOps is Couchbase KV's hard cap on the number of
+// operations in a single subdocument mutation request. Update() uses this as
+// a fallback trigger: go-ycsb's core workload defaults to writeallfields=false
+// (a single field per Update), staying under this cap, but this repo's own
+// workloads/workload_feature_store sets writeallfields=true against a
+// 51-field table - well over it - so the fallback path below is a real,
+// regularly-exercised path, not a hypothetical edge case.
+const couchbaseMaxSubdocOps = 16
+
+// couchbaseUpdateCasRetries bounds the fallback Get+merge+Replace path's
+// optimistic-concurrency retries (see below) - how many times it re-fetches
+// and re-merges after losing a CAS race, before giving up and returning the
+// conflict as a real error.
+const couchbaseUpdateCasRetries = 5
+
+// Update a document. Per the ycsb.DB interface contract, Update must merge
+// values into the existing document - fields not mentioned must survive
+// untouched - not replace the document wholesale. For values within
+// Couchbase's per-request subdocument op limit (the common case - see
+// couchbaseMaxSubdocOps), this is done atomically and in one round trip via
+// MutateIn/UpsertSpec, one spec per field: each spec sets exactly that
+// top-level field, leaving every other field alone, with no read-modify-write
+// race window.
+//
+// For a wider values map (reachable in practice - see couchbaseMaxSubdocOps),
+// it falls back to Get+merge+Replace, using the Get's CAS to detect a
+// concurrent write landing in between rather than silently losing it. A
+// worker retries this loop up to couchbaseUpdateCasRetries times on
+// ErrCasMismatch before giving up: with go-ycsb's own hotspot/zipfian key
+// distributions (the whole point of which is concentrating access onto a
+// small set of keys) and enough worker threads, two Updates landing on the
+// same key at nearly the same time is an expected, not exceptional,
+// occurrence - surfacing the first collision as a hard error, instead of
+// retrying, would turn normal contention into spurious UPDATE_ERROR noise.
 func (db *couchbaseDB) Update(ctx context.Context, table string, key string, values map[string][]byte) error {
 	col, err := db.getCollection(ctx, table)
 	if err != nil {
 		return err
 	}
-	_, err = col.Replace(key, values, &gocb.ReplaceOptions{
-		DurabilityLevel: db.durability,
-		Timeout:         db.kvTimeout,
-		Context:         ctx,
-	})
-	if err != nil {
-		return fmt.Errorf("Update error: %s", err.Error())
+
+	if len(values) <= couchbaseMaxSubdocOps {
+		specs := make([]gocb.MutateInSpec, 0, len(values))
+		for field, value := range values {
+			specs = append(specs, gocb.UpsertSpec(field, value, nil))
+		}
+		if _, err := col.MutateIn(key, specs, &gocb.MutateInOptions{
+			DurabilityLevel: db.durability,
+			Timeout:         db.kvTimeout,
+			Context:         ctx,
+		}); err != nil {
+			return fmt.Errorf("Update error: %s", err.Error())
+		}
+		return nil
 	}
-	return nil
+
+	var lastErr error
+	for attempt := 0; attempt <= couchbaseUpdateCasRetries; attempt++ {
+		getRes, err := col.Get(key, &gocb.GetOptions{Timeout: db.kvTimeout, Context: ctx})
+		if err != nil {
+			return fmt.Errorf("Update error: %s", err.Error())
+		}
+		var doc map[string][]byte
+		if err := getRes.Content(&doc); err != nil {
+			return fmt.Errorf("Update error: %s", err.Error())
+		}
+		if doc == nil {
+			doc = make(map[string][]byte, len(values))
+		}
+		for field, value := range values {
+			doc[field] = value
+		}
+
+		_, err = col.Replace(key, doc, &gocb.ReplaceOptions{
+			Cas:             getRes.Cas(),
+			DurabilityLevel: db.durability,
+			Timeout:         db.kvTimeout,
+			Context:         ctx,
+		})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, gocb.ErrCasMismatch) {
+			return fmt.Errorf("Update error: %s", err.Error())
+		}
+		lastErr = err
+	}
+	return fmt.Errorf("Update error: %s (after %d CAS retries)", lastErr.Error(), couchbaseUpdateCasRetries)
 }
 
 // Delete a document.
@@ -393,6 +499,27 @@ func (db *couchbaseDB) Delete(ctx context.Context, table string, key string) err
 }
 
 type couchbaseCreator struct{}
+
+// validateTLSScheme rejects tlsSkipVerify/caFile being set unless connStr
+// uses the couchbases:// (TLS) scheme. Capella (couchbases://) requires TLS
+// and ships publicly-trusted certificates by default, so no CA configuration
+// is needed for it in the common case - couchbase.tls_ca_file/tls_skip_verify
+// exist for a self-managed cluster's private CA or, for skip_verify, local
+// testing against a TLS-terminating proxy the way db/aerospike's test does.
+//
+// gocb only ever consults SecurityConfig.TLSSkipVerify/TLSRootCAs when the
+// connection string's scheme itself requests TLS - there is no independent
+// option to force it on. Without this check, an operator who sets
+// couchbase.tls_ca_file but leaves couchbase.connection_string at the plain
+// couchbase:// default (or mistypes it) gets a silent, unencrypted
+// connection: the CA file is read, parsed, and then simply never used, with
+// no error or log line.
+func validateTLSScheme(connStr string, tlsSkipVerify bool, caFile string) error {
+	if (tlsSkipVerify || caFile != "") && !strings.HasPrefix(connStr, "couchbases://") {
+		return fmt.Errorf("%s/%s requires a couchbases:// connection string (TLS) - %s is %q", couchbaseTLSSkipVerify, couchbaseTLSCAFile, couchbaseConnectionString, connStr)
+	}
+	return nil
+}
 
 func parseDurability(p *properties.Properties) (gocb.DurabilityLevel, error) {
 	switch strings.ToLower(p.GetString(couchbaseDurability, couchbaseDurabilityDefault)) {
@@ -444,21 +571,8 @@ func (c couchbaseCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 
 	tlsSkipVerify := p.GetBool(couchbaseTLSSkipVerify, false)
 	caFile := p.GetString(couchbaseTLSCAFile, "")
-	// Capella (couchbases://) requires TLS and ships publicly-trusted
-	// certificates by default, so no CA configuration is needed for it in
-	// the common case - couchbase.tls_ca_file/tls_skip_verify exist for a
-	// self-managed cluster's private CA or, for skip_verify, local testing
-	// against a TLS-terminating proxy the way db/aerospike's test does.
-	//
-	// gocb only ever consults SecurityConfig.TLSSkipVerify/TLSRootCAs when
-	// the connection string's scheme itself requests TLS (couchbases://) -
-	// there is no independent option to force it on. Without this check, an
-	// operator who sets couchbase.tls_ca_file but leaves
-	// couchbase.connection_string at the plain couchbase:// default (or
-	// mistypes it) gets a silent, unencrypted connection: the CA file is
-	// read, parsed, and then simply never used, with no error or log line.
-	if (tlsSkipVerify || caFile != "") && !strings.HasPrefix(connStr, "couchbases://") {
-		return nil, fmt.Errorf("%s/%s requires a couchbases:// connection string (TLS) - %s is %q", couchbaseTLSSkipVerify, couchbaseTLSCAFile, couchbaseConnectionString, connStr)
+	if err := validateTLSScheme(connStr, tlsSkipVerify, caFile); err != nil {
+		return nil, err
 	}
 	if tlsSkipVerify {
 		opts.SecurityConfig.TLSSkipVerify = true

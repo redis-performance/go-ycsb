@@ -198,4 +198,18 @@ if ! echo "$OUT" | grep -q 'INSERT_ERROR'; then
 fi
 echo "OK: auto_create_collection=false correctly rejected writes to a nonexistent collection"
 
+# Single-node CE can't reproduce the actual multi-node ErrScopeNotFound race
+# ensureCollection retries around (that needs CreateScope and CreateCollection
+# to land on two different, not-yet-mutually-consistent nodes - see
+# db/couchbase/db.go's ensureCollection doc comment) - but this at least
+# exercises the CreateScope call and the non-default-scope path end to end,
+# so it isn't completely untested.
+echo "==> [non-default scope] load+run against couchbase.scope=go_ycsb_it_scope"
+OUT=$(run_phase load workloads/workload_template -p table=usertable -p couchbase.scope=go_ycsb_it_scope -p recordcount=1000 -p operationcount=1000)
+echo "$OUT" | tail -5
+check_output "$OUT" INSERT 1000
+OUT=$(run_phase run workloads/workload_template -p table=usertable -p couchbase.scope=go_ycsb_it_scope -p recordcount=1000 -p operationcount=1000)
+echo "$OUT" | tail -5
+check_output "$OUT" TOTAL 1000
+
 echo "==> couchbase integration test passed"
