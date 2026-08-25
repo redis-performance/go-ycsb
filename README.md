@@ -119,6 +119,7 @@ See the comments at the top of `workloads/workload_feature_store` for the full d
 - Aerospike
 - Badger
 - Cassandra / ScyllaDB
+- Couchbase / Couchbase Capella
 - Pegasus
 - PostgreSQL / CockroachDB / AlloyDB / Yugabyte
 - RocksDB
@@ -317,6 +318,27 @@ Notes:
 - `cassandra.tls.ca` verifies the certificate **chain** but deliberately not the **hostname**: managed/SNI-proxied clusters (ScyllaDB Cloud confirmed) are dialed via explicit `host:port` pairs whose address doesn't necessarily match the certificate's SAN, so standard hostname verification would reject a perfectly valid connection. This can't be expressed as a simple boolean in the underlying gocql library, so this adapter supplies its own certificate-chain verification instead of relying on gocql's all-or-nothing verify/don't-verify toggle - see the comment above `newCassandraTLSConfig` in `db/cassandra/db.go` for the full mechanism.
 - When `cassandra.tls=true`, `cassandra.tls.disable_host_lookup` defaults to `true`. Managed/SNI-proxied clusters (confirmed on ScyllaDB Cloud) expose CQL-over-TLS on a distinct port from the plaintext native port reported back by `system.peers`/`system.local` during gocql's automatic ring discovery — without disabling that discovery, the driver connects fine to the first seed host on the TLS port, then tries every *other* discovered peer on the plaintext port and fails. Pass every node as an explicit `host:port` pair in `cassandra.cluster` when using TLS with the default. If you're instead connecting to a self-managed cluster that serves TLS uniformly, set `cassandra.tls.disable_host_lookup=false` to keep automatic node discovery.
 
+### Couchbase
+
+Works against both a self-managed Couchbase cluster and [Couchbase Capella](https://www.couchbase.com/products/capella/) - for Capella, set `couchbase.connection_string` to the `couchbases://cb.<cluster>.cloud.couchbase.com` connection string shown in its UI and a database credential's username/password; Capella enforces TLS (the `couchbases://` scheme) and ships a publicly-trusted certificate, so no CA configuration is needed for the common case.
+
+|field|default value|description|
+|-|-|-|
+|couchbase.connection_string|"couchbase://127.0.0.1"|Cluster connection string. Use `couchbases://...` for a TLS connection (required by Capella)|
+|couchbase.username|"Administrator"|Username|
+|couchbase.password|"password"|Password|
+|couchbase.bucket|"ycsb"|Bucket name. Must already exist - unlike scopes/collections (see `couchbase.auto_create_collection` below), this adapter does not create buckets|
+|couchbase.scope|"_default"|Scope name. Every bucket always has a ready-to-use "_default" scope, so this only needs setting for a non-default scope|
+|couchbase.auto_create_collection|true|Create the scope/collection for a workload's `table` on first use if it doesn't already exist. Every bucket always has a ready-to-use "_default" collection, so this only matters for a non-default `couchbase.scope` or a `table` other than "_default". Best-effort: a least-privilege credential (e.g. a Capella database credential without Manage Collections) will fail to create it, at which point the collection must be created out of band|
+|couchbase.durability|"none"|Synchronous replication level required before a write is acknowledged: "none", "majority", "majorityAndPersistActive", or "persistToMajority" - Couchbase's equivalent of a MongoDB write concern. Requires a multi-node cluster; there's no "read from majority" equivalent to pair with it, since a Couchbase KV read always goes to the single active node that owns the key, unlike a MongoDB replica set|
+|couchbase.tls_skip_verify|false|Skip TLS certificate verification entirely (insecure; for local/self-signed testing only)|
+|couchbase.tls_ca_file|""|Path to a PEM-encoded CA certificate, for a self-managed cluster's private CA. Not needed for Capella|
+|couchbase.kv_timeout|N/A|Timeout for a point KV op (Read/Insert/Update/Delete), e.g. "5s". Defaults to gocb's own default (2.5s)|
+|couchbase.scan_timeout|"30s"|Timeout for a Scan op. Kept separate from `couchbase.kv_timeout` and well above gocb's own internal 10s default: see the note on Scan concurrency below|
+
+Notes:
+- **Scan concurrency.** Scan is implemented via a KV range scan, which gocb's own docs describe as meant "for low concurrency batch queries where latency is not critical." Taken literally: running a high-`scanproportion` workload with many threads against Couchbase is outside that intended use, and this adapter has observed exactly that - concurrent range scans against the same collection - cause gocb's result stream to stall well past its own configured timeout. This adapter bounds every Scan call itself (`couchbase.scan_timeout`) so a stuck call fails cleanly instead of hanging a worker goroutine forever, but the underlying slowness/contention isn't something a client-side timeout can fix - keep `threadcount` low for a scan-heavy workload, same guidance gocb gives.
+
 ### MongoDB
 
 |field|default value|description|
@@ -421,9 +443,17 @@ make test-integration-cassandra-tls
 # no native TLS of its own, so this goes through a TLS-terminating proxy)
 # - same correct-CA/wrong-CA assertions as the cassandra test above
 make test-integration-aerospike-tls
+
+# Couchbase adapter (core + feature-store workloads, Scan, and an
+# auto_create_collection=false negative check) against dockerized Couchbase
+# Community Edition. The adapter's TLS path (couchbases://, for Capella) has
+# no CE equivalent to test in CI and was instead verified by hand against a
+# live Capella cluster - see db/couchbase/db.go and the README's Couchbase
+# section
+make test-integration-couchbase
 ```
 
-All three integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
+All four integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
 
 ## TODO
 
