@@ -253,43 +253,102 @@ OUT=$(run_phase run workloads/workload_template -p table=ditest -p dataintegrity
 echo "$OUT" | tail -5
 check_output "$OUT" TOTAL 6000
 
-# Direct regression guard for round 2's data-corruption bug specifically
-# (Update() used to call a full-document Replace with only the updated
-# field(s), silently destroying every other field): load a single document,
-# hammer it with single-field Updates, then read the raw stored document
-# back via cbc (bypassing this adapter's own Read entirely, so a bug in Read
-# masking a bug in Update can't hide this) and assert every original field
-# is still present.
-echo "==> [field preservation] Update() must not drop fields it wasn't asked to change"
+# read_raw_field_count fetches a document directly via cbc (bypassing this
+# adapter's own Read entirely, so a bug in Read masking a bug in Update
+# cannot hide anything) and prints its top-level field count. Retries: cbc
+# opens a brand-new libcouchbase connection per invocation with no retry of
+# its own, and a transient bootstrap hiccup under the load the preceding
+# phases just generated has been observed in practice - without this, that
+# would abort the whole script with an opaque Python traceback (from
+# feeding empty input to json.load under `set -euo pipefail`) instead of
+# either passing or producing a clear diagnostic.
+read_raw_field_count() {
+  local key=$1 table=$2 attempt cbc_out cbc_err json_line rc
+  local err_file
+  err_file=$(mktemp)
+  for attempt in 1 2 3 4 5; do
+    set +e
+    cbc_out=$(docker exec "$CONTAINER" cbc cat "$key" -u "$COUCHBASE_USER" -P "$COUCHBASE_PASS" \
+      -U "couchbase://127.0.0.1/${COUCHBASE_BUCKET}" --collection "$table" 2>"$err_file")
+    rc=$?
+    cbc_err=$(cat "$err_file")
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      json_line=$(echo "$cbc_out" | grep '^{' || true)
+      if [ -n "$json_line" ]; then
+        rm -f "$err_file"
+        echo "$json_line" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))"
+        return 0
+      fi
+    fi
+    echo "  (attempt $attempt/5: cbc cat '$key' from '$table' had no document yet - ${cbc_err:-no stderr output}) " >&2
+    sleep 1
+  done
+  rm -f "$err_file"
+  echo "FAIL: cbc cat never returned document '$key' from collection '$table' after 5 attempts" >&2
+  return 1
+}
+
+# Direct regression guard for round 2's data-corruption bug (Update() used
+# to call a full-document Replace with only the updated field(s), silently
+# destroying every other field): load a document, hammer it with
+# single-field Updates, then assert every original field is still present.
+#
+# lastfieldname=event.ts (unsafe as a subdocument path, see fieldPathSafe in
+# db/couchbase/db.go) deliberately routes some of these single-field updates
+# through Update's Get+merge+Replace fallback rather than only its MutateIn
+# fast path - fieldcount=2 makes the unsafe field get picked on roughly half
+# of the 30 update ops (P(never picked) = 0.5^30, negligible), so this
+# exercises the fallback's own merge loop against a genuinely partial
+# (single-field) update, the one scenario a future regression there could
+# reintroduce this exact bug class in.
+echo "==> [field preservation] Update() must not drop fields it wasn't asked to change (both the fast and fallback merge paths)"
 FC_TABLE=fieldpreservetest
-FC_FIELDCOUNT=10
+FC_FIELDCOUNT=2
 OUT=$(run_phase load workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_FIELDCOUNT" \
+  -p lastfieldname=event.ts -p lastfieldvaluetype=timestamp -p fieldvaluetype=numeric \
   -p insertorder=ordered -p recordcount=1 -p operationcount=1 -p threadcount=1)
 echo "$OUT" | tail -5
 check_output "$OUT" INSERT 1
 OUT=$(run_phase run workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_FIELDCOUNT" \
+  -p lastfieldname=event.ts -p lastfieldvaluetype=timestamp -p fieldvaluetype=numeric \
   -p insertorder=ordered -p recordcount=1 -p operationcount=30 -p threadcount=1 \
   -p readproportion=0 -p updateproportion=1)
 echo "$OUT" | tail -5
 check_output "$OUT" TOTAL 30
 
-got_fields=$(docker exec "$CONTAINER" cbc cat user0 -u "$COUCHBASE_USER" -P "$COUCHBASE_PASS" \
-  -U "couchbase://127.0.0.1/${COUCHBASE_BUCKET}" --collection "$FC_TABLE" 2>/dev/null \
-  | grep '^{' | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+if ! got_fields=$(read_raw_field_count user0 "$FC_TABLE"); then
+  exit 1
+fi
 if [ "$got_fields" != "$FC_FIELDCOUNT" ]; then
   echo "FAIL: expected all $FC_FIELDCOUNT fields to survive 30 single-field updates, found $got_fields"
   exit 1
 fi
-echo "OK: all $FC_FIELDCOUNT fields survived 30 single-field updates"
+echo "OK: all $FC_FIELDCOUNT fields survived 30 single-field updates across both merge paths"
 
-# Scan's scanCtx.Done() timeout path (the grace-window wait on resultCh, the
-# resHandle force-close fallback) has produced three real, confirmed bugs
-# across rounds 2-4 of review, entirely because nothing exercised it: the
-# "Scan smoke test" above never times out against a healthy local server.
-# Forcing couchbase.scan_timeout absurdly low makes every scan take that
-# path for real, asserting it fails cleanly (SCAN_ERROR, not a hang or a
+# Scan's timeout/cancellation handling has produced three real, confirmed
+# bugs across rounds 2-4 of review, entirely because nothing exercised any
+# of it: the "Scan smoke test" above never times out against a healthy local
+# server. Forcing couchbase.scan_timeout absurdly low makes every scan fail
+# for real, asserting Scan reports that cleanly (SCAN_ERROR, not a hang or a
 # panic) instead of only being checked by inspection.
-echo "==> [scan timeout] couchbase.scan_timeout=1ms forces Scan's timeout path - must fail cleanly, not hang"
+#
+# This exercises Scan's outer resultCh/scanCtx.Done() race and its overall
+# "never hang" contract - real coverage that was previously completely
+# missing - but NOT specifically the resHandle force-close branch
+# (db/couchbase/db.go's Scan, the "case res := <-resHandle" arm): reaching
+# that branch requires col.Scan() to have already produced a live
+# *gocb.ScanResult before scanCtx's deadline fires, and empirically, at a
+# timeout this short, gocb's own internal Timeout option (set to the same
+# value) resolves the whole call as an error before a *ScanResult ever
+# exists, every time. The resHandle branch only matters for the specific
+# pathological case documented in Scan's doc comment - gocb's result stream
+# stalling past its own configured timeout under concurrent scan load -
+# which, like the multi-node ErrScopeNotFound race tested informally
+# elsewhere in this file, cannot be reliably forced on demand in a fast,
+# deterministic CI test; it was found and fixed via real load, not
+# reproduced synthetically.
+echo "==> [scan timeout] couchbase.scan_timeout=1ms forces a real Scan failure - must fail cleanly, not hang"
 set +e
 OUT=$(run_phase run workloads/workload_template -p table=usertable \
   -p recordcount="$RECORDCOUNT" -p operationcount=20 -p threadcount=1 \
