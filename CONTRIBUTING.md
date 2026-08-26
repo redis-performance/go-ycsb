@@ -16,7 +16,7 @@ make
 ```
 
 Requirements:
-- Go 1.24 or later (`go version` to check)
+- Go 1.25 or later (`go version` to check)
 - Optional: FoundationDB client library, RocksDB, or libsqlite3 for those database backends (the Makefile detects them automatically)
 
 ## Branch naming
@@ -69,13 +69,20 @@ make test-integration-aerospike-tls
 
 # Couchbase adapter against dockerized Couchbase Community Edition
 make test-integration-couchbase
+
+# Cosmos DB adapter against a dockerized Azure Cosmos DB (vNext) emulator
+make test-integration-cosmosdb
+
+# Cosmos DB TLS support (via a TLS-terminating proxy, since the emulator
+# only serves plain HTTP)
+make test-integration-cosmosdb-tls
 ```
 
 **Adding a new database adapter capability (TLS, auth, a protocol change, etc.)?** Two things are required, not optional:
 - Check the client library is on its latest version (`go list -m -versions <module>` vs. what's pinned in `go.mod`) and upgrade it first if it's stale, before building the new capability on top.
 - Add a Docker-based integration test under `test/integration/`, wired into a `make test-integration-*` target and a job in `.github/workflows/integration.yml`, following the existing pattern. For TLS/auth specifically, assert on both directions (valid credential accepted AND invalid one rejected) — see `AGENTS.md`'s "Database adapter changes" section for why.
 
-Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run `go test ./...` — that remains the contributor's responsibility locally before opening a PR. A separate CI workflow (`.github/workflows/integration.yml`) runs `feature-store`, `cassandra-tls`, `aerospike-tls`, and `couchbase` jobs against dockerized backends on every push/PR to `master`.
+Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run `go test ./...` — that remains the contributor's responsibility locally before opening a PR. A separate CI workflow (`.github/workflows/integration.yml`) runs `feature-store`, `cassandra-tls`, `aerospike-tls`, `couchbase`, and `cosmosdb` jobs against dockerized backends on every push/PR to `master`.
 
 ## Review process
 

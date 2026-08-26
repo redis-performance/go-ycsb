@@ -64,6 +64,8 @@ import (
 	_ "github.com/pingcap/go-ycsb/db/cassandra"
 	// Register couchbase database
 	_ "github.com/pingcap/go-ycsb/db/couchbase"
+	// Register cosmosdb database
+	_ "github.com/pingcap/go-ycsb/db/cosmosdb"
 	// Register mongodb database
 	_ "github.com/pingcap/go-ycsb/db/mongodb"
 	// Register redis database

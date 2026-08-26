@@ -85,3 +85,26 @@ test-integration-couchbase:
 test-couchbase:
 	go test ./db/couchbase/...
 
+# Runs db/cosmosdb/db.go's core and feature-store load+run phases, a Scan
+# smoke test (cross-partition query, given this adapter's
+# partition-key-per-record design), a field-preservation regression check,
+# and an auto_create_container=false negative check, against a dockerized
+# Azure Cosmos DB (vNext) Linux emulator. Same target locally and in CI.
+test-integration-cosmosdb:
+	./test/integration/cosmosdb.sh
+
+# Runs db/cosmosdb/db.go's TLS support (cosmosdb.insecure_skip_verify)
+# against a dockerized Cosmos DB (vNext) Linux emulator behind a TLS-
+# terminating proxy (the emulator itself serves plain HTTP - see
+# test/integration/cosmosdb_tls.sh's header comment), asserting on
+# connection outcome in both directions: rejected by default against an
+# untrusted cert, accepted with insecure_skip_verify=true. Same target
+# locally and in CI.
+test-integration-cosmosdb-tls:
+	./test/integration/cosmosdb_tls.sh
+
+# Unit tests for db/cosmosdb specifically - see test-couchbase's comment for
+# why this isn't just `go test ./...`.
+test-cosmosdb:
+	go test ./db/cosmosdb/...
+
