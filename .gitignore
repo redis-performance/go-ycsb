@@ -16,4 +16,5 @@ tool/tool
 .cassandra-tls-it
 .aerospike-tls-it
 .couchbase-it
+.cosmosdb-it
 .env
