@@ -479,6 +479,24 @@ func parseConsistencyLevel(p *properties.Properties) (*azcosmos.ConsistencyLevel
 	return nil, fmt.Errorf("unknown %s %q: expected one of %v", cosmosConsistencyLevel, raw, azcosmos.ConsistencyLevelValues())
 }
 
+// parsePositiveDuration parses key as a time.Duration, defaulting to def if
+// unset, and rejects zero or negative values: every caller plugs the result
+// straight into context.WithTimeout, which - given a duration <= 0 -
+// returns a context whose deadline has already passed, so every subsequent
+// operation would fail instantly with a generic "context deadline exceeded"
+// that gives no hint the root cause is this config value.
+func parsePositiveDuration(p *properties.Properties, key string, def time.Duration) (time.Duration, error) {
+	raw, ok := p.Get(key)
+	if !ok {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be a positive duration", key, raw)
+	}
+	return d, nil
+}
+
 // parseThroughputOptions builds the ThroughputProperties passed to container
 // creation when cosmosAutoCreateContainer is set. Both cosmosThroughput and
 // cosmosAutoscaleMaxThroughput provision real, billed RU/s, so a malformed
@@ -524,20 +542,14 @@ func (c cosmosDBCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		return nil, err
 	}
 
-	opTimeout := cosmosOpTimeoutDefault
-	if opTimeoutStr, ok := p.Get(cosmosOpTimeout); ok {
-		opTimeout, err = time.ParseDuration(opTimeoutStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s %q: %w", cosmosOpTimeout, opTimeoutStr, err)
-		}
+	opTimeout, err := parsePositiveDuration(p, cosmosOpTimeout, cosmosOpTimeoutDefault)
+	if err != nil {
+		return nil, err
 	}
 
-	scanTimeout := cosmosScanTimeoutDefault
-	if scanTimeoutStr, ok := p.Get(cosmosScanTimeout); ok {
-		scanTimeout, err = time.ParseDuration(scanTimeoutStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s %q: %w", cosmosScanTimeout, scanTimeoutStr, err)
-		}
+	scanTimeout, err := parsePositiveDuration(p, cosmosScanTimeout, cosmosScanTimeoutDefault)
+	if err != nil {
+		return nil, err
 	}
 
 	var throughputOpts *azcosmos.ThroughputProperties

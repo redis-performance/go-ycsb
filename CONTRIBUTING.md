@@ -16,7 +16,7 @@ make
 ```
 
 Requirements:
-- Go 1.24 or later (`go version` to check)
+- Go 1.25 or later (`go version` to check)
 - Optional: FoundationDB client library, RocksDB, or libsqlite3 for those database backends (the Makefile detects them automatically)
 
 ## Branch naming

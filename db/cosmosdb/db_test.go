@@ -3,6 +3,7 @@ package cosmosdb
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 	"github.com/magiconair/properties"
@@ -108,6 +109,39 @@ func TestRejectSystemFieldNames(t *testing.T) {
 			err := rejectSystemFieldNames(tt.values)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("rejectSystemFieldNames(%v) error = %v, wantErr %v", tt.values, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParsePositiveDuration(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string // "" means unset
+		want    time.Duration
+		wantErr bool
+	}{
+		{"unset uses default", "", 5 * time.Second, false},
+		{"valid", "10s", 10 * time.Second, false},
+		{"zero", "0s", 0, true},
+		{"zero unitless", "0", 0, true},
+		{"negative", "-5s", 0, true},
+		{"unparseable", "not-a-duration", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := properties.NewProperties()
+			if tt.value != "" {
+				if _, _, err := p.Set(cosmosOpTimeout, tt.value); err != nil {
+					t.Fatalf("p.Set: %v", err)
+				}
+			}
+			got, err := parsePositiveDuration(p, cosmosOpTimeout, 5*time.Second)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parsePositiveDuration(%q) error = %v, wantErr %v", tt.value, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("parsePositiveDuration(%q) = %v, want %v", tt.value, got, tt.want)
 			}
 		})
 	}

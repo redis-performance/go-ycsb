@@ -355,8 +355,8 @@ Uses the Core (SQL) API natively - not Cosmos DB's MongoDB- or Cassandra-API com
 |cosmosdb.throughput|400|Manual RU/s for an auto-created database/container (400 is Cosmos DB's own platform minimum). Ignored if `cosmosdb.autoscale_max_throughput` is set|
 |cosmosdb.autoscale_max_throughput|N/A|Autoscale max RU/s for an auto-created database/container, instead of manual `cosmosdb.throughput`|
 |cosmosdb.consistency_level|N/A|Per-operation consistency override, e.g. "Strong", "Session", "Eventual". The Cosmos DB SDK only allows *relaxing* consistency below the account's own configured default - there is no way for this property to request stronger consistency than the account was provisioned with. If you want Strong consistency end to end, the Cosmos DB **account** itself must be configured with Strong as its default; leave this unset to just inherit that|
-|cosmosdb.op_timeout|"10s"|Timeout for every individual point operation (Read/Insert/Update/Delete, and each Scan page request), via context cancellation|
-|cosmosdb.scan_timeout|"60s"|Timeout for a whole Scan call, separate from `cosmosdb.op_timeout`: Scan pages through a cross-partition query via multiple round trips until `count` items are collected, so its total duration is a multiple of a single operation's, not comparable to one|
+|cosmosdb.op_timeout|"10s"|Timeout for every individual point operation (Read/Insert/Update/Delete), via context cancellation. Does not bound Scan - see `cosmosdb.scan_timeout`. Must be a positive duration|
+|cosmosdb.scan_timeout|"60s"|Timeout for a whole Scan call, separate from `cosmosdb.op_timeout`: Scan pages through a cross-partition query via multiple round trips until `count` items are collected, so its total duration is a multiple of a single operation's, not comparable to one. Must be a positive duration|
 |cosmosdb.insecure_skip_verify|false|Skip TLS certificate verification entirely (insecure; for local/self-signed testing only, e.g. against the Cosmos DB Linux emulator's self-signed certificate)|
 
 Notes:
