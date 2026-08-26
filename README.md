@@ -352,15 +352,15 @@ Uses the Core (SQL) API natively - not Cosmos DB's MongoDB- or Cassandra-API com
 |cosmosdb.connection_string|""|Alternative to `cosmosdb.endpoint`/`cosmosdb.key`|
 |cosmosdb.database|"ycsb"|Database name|
 |cosmosdb.auto_create_container|false|Create the database/container for a workload's `table` on first use if it doesn't already exist. Defaults to **false**, unlike Couchbase's equivalent (`couchbase.auto_create_collection`, true by default): creating a Cosmos DB container provisions real, billed throughput, so auto-creating one as a side effect of a typo'd `cosmosdb.database`/table name is a real-money footgun a local/free database doesn't have|
-|cosmosdb.throughput|400|Manual RU/s for an auto-created database/container (400 is Cosmos DB's own platform minimum). Ignored if `cosmosdb.autoscale_max_throughput` is set|
-|cosmosdb.autoscale_max_throughput|N/A|Autoscale max RU/s for an auto-created database/container, instead of manual `cosmosdb.throughput`|
+|cosmosdb.throughput|400|Manual RU/s for an auto-created container (400 is Cosmos DB's own platform minimum). Only applies to container creation - an auto-created database itself gets no shared throughput of its own, since this adapter is designed around per-container throughput. Ignored if `cosmosdb.autoscale_max_throughput` is set|
+|cosmosdb.autoscale_max_throughput|N/A|Autoscale max RU/s for an auto-created container, instead of manual `cosmosdb.throughput`. Same per-container scope as above|
 |cosmosdb.consistency_level|N/A|Per-operation consistency override, e.g. "Strong", "Session", "Eventual". The Cosmos DB SDK only allows *relaxing* consistency below the account's own configured default - there is no way for this property to request stronger consistency than the account was provisioned with. If you want Strong consistency end to end, the Cosmos DB **account** itself must be configured with Strong as its default; leave this unset to just inherit that|
 |cosmosdb.op_timeout|"10s"|Timeout for every individual point operation (Read/Insert/Update/Delete), via context cancellation. Does not bound Scan - see `cosmosdb.scan_timeout`. Must be a positive duration|
 |cosmosdb.scan_timeout|"60s"|Timeout for a whole Scan call, separate from `cosmosdb.op_timeout`: Scan pages through a cross-partition query via multiple round trips until `count` items are collected, so its total duration is a multiple of a single operation's, not comparable to one. Must be a positive duration|
 |cosmosdb.insecure_skip_verify|false|Skip TLS certificate verification entirely (insecure; for local/self-signed testing only, e.g. against the Cosmos DB Linux emulator's self-signed certificate)|
 
 Notes:
-- **Update merges, and mostly does so atomically.** For a values map within Cosmos DB's 10-operation-per-request `PatchItem` limit (the common case - go-ycsb's core workload defaults to `writeallfields=false`, a single field per Update), Update uses `PatchItem`/`AppendSet`, one operation per field: this sets exactly the fields being updated and leaves every other field on the document untouched, in one round trip, with no read-modify-write race window. A wider values map (reachable with `writeallfields=true` against a table with more than 10 fields - `workloads/workload_feature_store`'s actual default) falls back to Read+merge+Replace, using the Read's ETag for optimistic concurrency (Cosmos DB's equivalent of a CAS token) so a concurrent write landing in between is detected as a conflict and retried (up to 5 times) rather than silently lost.
+- **Update merges, and mostly does so atomically.** For a values map within Cosmos DB's 10-operation-per-request `PatchItem` limit (the common case - go-ycsb's core workload defaults to `writeallfields=false`, a single field per Update), Update uses `PatchItem`/`AppendSet`, one operation per field: this sets exactly the fields being updated and leaves every other field on the document untouched, in one round trip, with no read-modify-write race window. A wider values map (reachable with `writeallfields=true` against a table with more than 10 fields - `workloads/workload_feature_store`'s actual default) falls back to Read+merge+Replace, using the Read's ETag for optimistic concurrency (Cosmos DB's equivalent of a CAS token) so a concurrent write landing in between is detected as a conflict and retried (up to 5 additional times, 6 attempts total) rather than silently lost.
 - **Scan performance.** Since the partition key is always the record key, Scan has to run as a cross-partition `SELECT * FROM c WHERE c.id >= @start ORDER BY c.id` query - correct, but meaningfully slower per-op (and costlier in RU) than a point read. Keep this in mind for a scan-heavy workload.
 
 ### MongoDB
@@ -481,9 +481,15 @@ make test-integration-couchbase
 # auto_create_container=false negative check) against a dockerized Azure
 # Cosmos DB (vNext) Linux emulator
 make test-integration-cosmosdb
+
+# Cosmos DB TLS support (cosmosdb.insecure_skip_verify) - the emulator above
+# only serves plain HTTP, so this goes through a TLS-terminating proxy
+# (same pattern as the Aerospike TLS test) to assert rejected-by-default /
+# accepted-with-skip-verify=true
+make test-integration-cosmosdb-tls
 ```
 
-All five integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
+All six integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
 
 ## TODO
 

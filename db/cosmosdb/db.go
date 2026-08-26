@@ -53,11 +53,13 @@ const (
 
 	// cosmosAutoCreateContainer defaults to false - unlike
 	// couchbase.auto_create_collection (true by default), because creating
-	// a Cosmos DB database/container provisions real, billed throughput
-	// (RU/s). Auto-creating that as a side effect of a typo'd
-	// cosmosdb.database/table name is a real-money footgun a local/free
-	// database like Couchbase CE doesn't have, so this adapter requires an
-	// explicit opt-in instead of Couchbase's best-effort-by-default.
+	// a Cosmos DB container provisions real, billed throughput (RU/s) -
+	// the database itself, if also auto-created, gets no shared throughput
+	// of its own (see cosmosThroughput below). Auto-creating a container as
+	// a side effect of a typo'd cosmosdb.database/table name is a
+	// real-money footgun a local/free database like Couchbase CE doesn't
+	// have, so this adapter requires an explicit opt-in instead of
+	// Couchbase's best-effort-by-default.
 	cosmosAutoCreateContainer        = "cosmosdb.auto_create_container"
 	cosmosAutoCreateContainerDefault = false
 
@@ -96,10 +98,12 @@ const (
 const cosmosMaxPatchOps = 10
 
 // cosmosUpdateEtagRetries bounds the fallback Read+merge+Replace path's
-// optimistic-concurrency retries (ETag-based, Cosmos DB's equivalent of a
-// CAS token) - see Update's doc comment for why retrying instead of failing
-// on the first conflict matters for go-ycsb's own hotspot/zipfian key
-// distributions.
+// optimistic-concurrency RETRIES (ETag-based, Cosmos DB's equivalent of a
+// CAS token) on top of the initial attempt - cosmosUpdateEtagRetries+1
+// attempts total (attempt 0 is the initial try; attempts 1..
+// cosmosUpdateEtagRetries are the retries) - see Update's doc comment for
+// why retrying instead of failing on the first conflict matters for
+// go-ycsb's own hotspot/zipfian key distributions.
 const cosmosUpdateEtagRetries = 5
 
 // jsonPointerEscape escapes a field name for use as a Cosmos DB
@@ -292,12 +296,20 @@ func (db *cosmosDB) Scan(ctx context.Context, table string, startKey string, cou
 	defer cancel()
 
 	opts := &azcosmos.QueryOptions{
-		QueryParameters: []azcosmos.QueryParameter{{Name: "@start", Value: startKey}},
+		QueryParameters: []azcosmos.QueryParameter{{Name: "@start", Value: startKey}, {Name: "@count", Value: count}},
 	}
 	if db.consistency != nil {
 		opts.ConsistencyLevel = db.consistency
 	}
-	pager := container.NewQueryItemsPager("SELECT * FROM c WHERE c.id >= @start ORDER BY c.id", azcosmos.NewPartitionKey(), opts)
+	// OFFSET 0 LIMIT @count pushes the row cap down to the query engine
+	// instead of relying purely on the client-side break below: without it,
+	// a cross-partition ORDER BY still has to do a full page fetch and
+	// cross-partition merge-sort even for a tiny maxscanlength, distorting
+	// this adapter's own reported Scan latency/RU figures. The client-side
+	// len(docs) >= count checks stay as a defensive backstop - LIMIT is a
+	// cap (min(count, matches)), so this can never return fewer items than
+	// actually exist.
+	pager := container.NewQueryItemsPager("SELECT * FROM c WHERE c.id >= @start ORDER BY c.id OFFSET 0 LIMIT @count", azcosmos.NewPartitionKey(), opts)
 
 	docs := make([]map[string][]byte, 0, count)
 	for len(docs) < count && pager.More() {
@@ -372,11 +384,12 @@ func canUsePatchUpdate(values map[string][]byte) bool {
 // against a table with more than cosmosMaxPatchOps fields), it falls back
 // to Read+merge+Replace, using the Read's ETag to detect a concurrent write
 // landing in between (Cosmos DB's IfMatchEtag is its equivalent of a CAS
-// token) rather than silently losing it. A worker retries this loop up to
-// cosmosUpdateEtagRetries times on a 412 Precondition Failed before giving
-// up: with go-ycsb's own hotspot/zipfian key distributions and enough
-// worker threads, two Updates landing on the same key at nearly the same
-// time is an expected, not exceptional, occurrence.
+// token) rather than silently losing it. A worker makes this loop's initial
+// attempt plus up to cosmosUpdateEtagRetries more retries on a 412
+// Precondition Failed (cosmosUpdateEtagRetries+1 attempts total) before
+// giving up: with go-ycsb's own hotspot/zipfian key distributions and
+// enough worker threads, two Updates landing on the same key at nearly the
+// same time is an expected, not exceptional, occurrence.
 func (db *cosmosDB) Update(ctx context.Context, table string, key string, values map[string][]byte) error {
 	if err := rejectSystemFieldNames(values); err != nil {
 		return fmt.Errorf("Update error: %s", err.Error())
@@ -400,6 +413,8 @@ func (db *cosmosDB) Update(ctx context.Context, table string, key string, values
 	}
 
 	var lastErr error
+	// attempt 0 is the initial try; attempts 1..cosmosUpdateEtagRetries are
+	// the retries (cosmosUpdateEtagRetries+1 attempts total).
 	for attempt := 0; attempt <= cosmosUpdateEtagRetries; attempt++ {
 		readCtx, readCancel := context.WithTimeout(ctx, db.opTimeout)
 		res, err := container.ReadItem(readCtx, docPartitionKey(key), key, db.itemOptions())
@@ -439,7 +454,7 @@ func (db *cosmosDB) Update(ctx context.Context, table string, key string, values
 		}
 		lastErr = err
 	}
-	return fmt.Errorf("Update error: %s (after %d ETag retries)", lastErr.Error(), cosmosUpdateEtagRetries)
+	return fmt.Errorf("Update error: %s (after %d ETag retries, %d attempts total)", lastErr.Error(), cosmosUpdateEtagRetries, cosmosUpdateEtagRetries+1)
 }
 
 // Delete a document.
