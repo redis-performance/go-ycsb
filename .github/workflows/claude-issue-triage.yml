@@ -27,6 +27,17 @@ name: Claude Automated Issue Triage
 on:
   issues:
     types: [opened]
+  # Manual re-run for maintainer testing/verification only. Currently
+  # untestable in practice since issues are disabled on this fork (see NOTE
+  # above), but kept for parity with claude-pr-review.yml and ready to go if
+  # issues are ever enabled. GitHub restricts workflow_dispatch to actors
+  # with write access to this repo.
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to run the triage against"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -36,7 +47,7 @@ permissions:
 jobs:
   claude-triage:
     # Skip the repo's own maintainers/members -- see header comment.
-    if: github.event.issue.author_association != 'OWNER' && github.event.issue.author_association != 'MEMBER' && github.event.issue.author_association != 'COLLABORATOR'
+    if: github.event_name == 'workflow_dispatch' || (github.event.issue.author_association != 'OWNER' && github.event.issue.author_association != 'MEMBER' && github.event.issue.author_association != 'COLLABORATOR')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -55,7 +66,7 @@ jobs:
 
           prompt: |
             REPO: ${{ github.repository }}
-            ISSUE NUMBER: ${{ github.event.issue.number }}
+            ISSUE NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
 
             Read this newly-opened issue's title and body via `gh issue view`.
 
@@ -108,7 +119,7 @@ jobs:
 
           claude_args: |
             --allowedTools "Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh pr list:*)"
-            --max-turns 6
+            --max-turns 35
             --json-schema '{"type":"object","properties":{"skip_comment":{"type":"boolean","description":"true if the issue is already clear/actionable and needs no comment"},"comment_body":{"type":"string","description":"The triage comment text, empty string if skip_comment is true"}},"required":["skip_comment","comment_body"]}'
 
       - name: Post comment (only after a deterministic secret-pattern check)
@@ -116,7 +127,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
         run: |
           set -euo pipefail
 
