@@ -174,22 +174,29 @@ echo "OK: auto_create_container=false correctly rejected writes to a nonexistent
 
 # Direct regression guard for the exact data-corruption bug class
 # db/couchbase/db.go's Update hit in this repo's history (a full-document
-# replace silently dropping every field not included in the call): load a
-# document, hammer it with single-field Updates (the PatchItem fast path,
-# <=10 ops), then read the raw stored document back via a standalone probe
-# program that calls azcosmos.ReadItem directly - bypassing this adapter's
-# Update() entirely, so a bug there can't be masked by anything Update
-# itself does - and assert every original field is still present.
-echo "==> [field preservation] Update() must not drop fields it wasn't asked to change"
+# replace silently dropping every field not included in the call). This must
+# specifically exercise db.go's Read+merge+Replace fallback, not the
+# PatchItem fast path: the fast path issues one atomic AppendSet per field
+# and structurally cannot drop an unrelated field, so a single-field Update
+# (writeallfields=false, the core workload's default) would never reach the
+# code this is meant to guard. FC_FIELDCOUNT is > cosmosMaxPatchOps (10) and
+# every Update writes all of them (writeallfields=true), so
+# canUsePatchUpdate returns false on every call and each Update is forced
+# through the fallback's Read+merge+Replace loop - then the raw stored
+# document is read back via a standalone probe program that calls
+# azcosmos.ReadItem directly, bypassing this adapter's Update() entirely so
+# a bug there can't be masked by anything Update itself does - and every
+# original field must still be present.
+echo "==> [field preservation] Update()'s Read+merge+Replace fallback must not drop fields"
 FC_TABLE=fieldpreservetest
-FC_FIELDCOUNT=10
+FC_FIELDCOUNT=15
 OUT=$(run_phase load workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_FIELDCOUNT" \
   -p insertorder=ordered -p recordcount=1 -p operationcount=1 -p threadcount=1)
 echo "$OUT" | tail -5
 check_output "$OUT" INSERT 1
 OUT=$(run_phase run workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_FIELDCOUNT" \
   -p insertorder=ordered -p recordcount=1 -p operationcount=30 -p threadcount=1 \
-  -p readproportion=0 -p updateproportion=1)
+  -p readproportion=0 -p updateproportion=1 -p writeallfields=true)
 echo "$OUT" | tail -5
 check_output "$OUT" TOTAL 30
 
@@ -242,9 +249,9 @@ EOF
 
 got_fields=$(cd "$ROOT_DIR" && go run "$WORK_DIR/probe.go")
 if [ "$got_fields" != "$FC_FIELDCOUNT" ]; then
-  echo "FAIL: expected all $FC_FIELDCOUNT fields to survive 30 single-field updates, found $got_fields"
+  echo "FAIL: expected all $FC_FIELDCOUNT fields to survive 30 full-document (Read+merge+Replace fallback) updates, found $got_fields"
   exit 1
 fi
-echo "OK: all $FC_FIELDCOUNT fields survived 30 single-field updates"
+echo "OK: all $FC_FIELDCOUNT fields survived 30 Read+merge+Replace fallback updates"
 
 echo "==> cosmosdb integration test passed"
