@@ -18,7 +18,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       # test/integration/feature_store.sh starts (and tears down) its own
       # disposable Redis/MongoDB containers, so this is the same command
@@ -38,7 +38,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       # test/integration/cassandra_tls.sh starts (and tears down) its own
       # disposable, TLS-enabled ScyllaDB container plus a throwaway CA/cert
@@ -57,7 +57,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       # test/integration/aerospike_tls.sh starts (and tears down) its own
       # disposable Aerospike Community Edition container plus a TLS-
@@ -76,7 +76,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       # Network-free unit tests (TLS-scheme validation, subdocument-path
       # field-name safety, Update's branch-selection logic) - this repo
@@ -93,3 +93,29 @@ jobs:
         run: make test-integration-couchbase
         env:
           RECORDCOUNT: 20000
+
+  cosmosdb:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      # Network-free unit tests (JSON Pointer field-name escaping,
+      # Update's branch-selection logic, Cosmos DB system-property
+      # stripping, consistency-level parsing) - see the Couchbase job's
+      # comment above for why this repo runs these explicitly in CI.
+      - name: Cosmos DB adapter unit tests
+        run: make test-cosmosdb
+
+      # test/integration/cosmosdb.sh starts (and tears down) its own
+      # disposable Azure Cosmos DB (vNext) Linux emulator container, so this
+      # is the same command a developer runs locally via
+      # `make test-integration-cosmosdb`.
+      - name: Cosmos DB adapter vs. dockerized Cosmos DB emulator
+        run: make test-integration-cosmosdb
