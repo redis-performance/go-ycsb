@@ -85,3 +85,16 @@ test-integration-couchbase:
 test-couchbase:
 	go test ./db/couchbase/...
 
+# Runs db/cosmosdb/db.go's core and feature-store load+run phases, a Scan
+# smoke test (cross-partition query, given this adapter's
+# partition-key-per-record design), a field-preservation regression check,
+# and an auto_create_container=false negative check, against a dockerized
+# Azure Cosmos DB (vNext) Linux emulator. Same target locally and in CI.
+test-integration-cosmosdb:
+	./test/integration/cosmosdb.sh
+
+# Unit tests for db/cosmosdb specifically - see test-couchbase's comment for
+# why this isn't just `go test ./...`.
+test-cosmosdb:
+	go test ./db/cosmosdb/...
+
