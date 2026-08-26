@@ -87,6 +87,71 @@ func TestFilterFields(t *testing.T) {
 	}
 }
 
+func TestRejectSystemFieldNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		values  map[string][]byte
+		wantErr bool
+	}{
+		{"no fields", map[string][]byte{}, false},
+		{"ordinary fields", map[string][]byte{"field0": []byte("v"), "field1": []byte("v")}, false},
+		{"id", map[string][]byte{"id": []byte("v")}, true},
+		{"_rid", map[string][]byte{"_rid": []byte("v")}, true},
+		{"_self", map[string][]byte{"_self": []byte("v")}, true},
+		{"_etag", map[string][]byte{"_etag": []byte("v")}, true},
+		{"_attachments", map[string][]byte{"_attachments": []byte("v")}, true},
+		{"_ts", map[string][]byte{"_ts": []byte("v")}, true},
+		{"mixed with a system field", map[string][]byte{"field0": []byte("v"), "_ts": []byte("v")}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := rejectSystemFieldNames(tt.values)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("rejectSystemFieldNames(%v) error = %v, wantErr %v", tt.values, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseThroughputOptions(t *testing.T) {
+	tests := []struct {
+		name       string
+		throughput string // "" means unset
+		autoscale  string // "" means unset
+		wantErr    bool
+	}{
+		{"defaults", "", "", false},
+		{"valid manual", "1000", "", false},
+		{"valid autoscale", "", "4000", false},
+		{"manual with trailing garbage", "1000RU", "", true},
+		{"manual negative", "-500", "", true},
+		{"manual zero", "0", "", true},
+		{"manual with thousands separator", "4,000", "", true},
+		{"autoscale with trailing garbage", "", "4000abc", true},
+		{"autoscale negative", "", "-4000", true},
+		{"autoscale zero", "", "0", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := properties.NewProperties()
+			if tt.throughput != "" {
+				if _, _, err := p.Set(cosmosThroughput, tt.throughput); err != nil {
+					t.Fatalf("p.Set(throughput): %v", err)
+				}
+			}
+			if tt.autoscale != "" {
+				if _, _, err := p.Set(cosmosAutoscaleMaxThroughput, tt.autoscale); err != nil {
+					t.Fatalf("p.Set(autoscale): %v", err)
+				}
+			}
+			_, err := parseThroughputOptions(p)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseThroughputOptions(throughput=%q, autoscale=%q) error = %v, wantErr %v", tt.throughput, tt.autoscale, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseConsistencyLevel(t *testing.T) {
 	tests := []struct {
 		name    string

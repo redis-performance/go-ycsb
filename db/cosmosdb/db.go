@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,7 +70,20 @@ const (
 	cosmosAutoscaleMaxThroughput = "cosmosdb.autoscale_max_throughput"
 	cosmosOpTimeout              = "cosmosdb.op_timeout"
 	cosmosOpTimeoutDefault       = 10 * time.Second
-	cosmosInsecureSkipVerify     = "cosmosdb.insecure_skip_verify"
+
+	// cosmosScanTimeout bounds a whole Scan call, not a single request:
+	// Scan pages through a cross-partition query via repeated
+	// pager.NextPage calls until count items are collected, so its total
+	// duration is a multiple of a single point-operation's, and reusing
+	// cosmosOpTimeout for the whole thing (as this adapter's Read/Insert/
+	// Update/Delete correctly do for their own single request) starves
+	// later pages of an already-succeeding scan under go-ycsb's own
+	// defaults (maxscanlength=1000 at roughly 100 items/page, and a
+	// freshly auto-created container's 400 RU/s default throughput).
+	cosmosScanTimeout        = "cosmosdb.scan_timeout"
+	cosmosScanTimeoutDefault = 60 * time.Second
+
+	cosmosInsecureSkipVerify = "cosmosdb.insecure_skip_verify"
 )
 
 // cosmosMaxPatchOps is Cosmos DB's hard cap on the number of operations in a
@@ -108,6 +122,22 @@ var cosmosSystemFields = map[string]bool{
 	"id": true, "_rid": true, "_self": true, "_etag": true, "_attachments": true, "_ts": true,
 }
 
+// rejectSystemFieldNames errors out if values contains a field name Cosmos
+// DB reserves for its own system properties (see cosmosSystemFields).
+// Writing such a field would be silently discarded/overwritten server-side,
+// and decodeDoc strips it from every later Read/Scan regardless - so
+// without this check, a workload field that happens to collide with one of
+// these names loses its data permanently with no error anywhere in the
+// pipeline.
+func rejectSystemFieldNames(values map[string][]byte) error {
+	for field := range values {
+		if cosmosSystemFields[field] {
+			return fmt.Errorf("field name %q collides with a Cosmos DB system property and cannot be used", field)
+		}
+	}
+	return nil
+}
+
 type cosmosDB struct {
 	client         *azcosmos.Client
 	database       *azcosmos.DatabaseClient
@@ -115,6 +145,7 @@ type cosmosDB struct {
 	autoCreate     bool
 	throughputOpts *azcosmos.ThroughputProperties
 	opTimeout      time.Duration
+	scanTimeout    time.Duration
 	consistency    *azcosmos.ConsistencyLevel
 
 	// containers caches table -> *azcosmos.ContainerClient. A sync.Map, not
@@ -257,7 +288,7 @@ func (db *cosmosDB) Scan(ctx context.Context, table string, startKey string, cou
 		return nil, err
 	}
 
-	opCtx, cancel := context.WithTimeout(ctx, db.opTimeout)
+	opCtx, cancel := context.WithTimeout(ctx, db.scanTimeout)
 	defer cancel()
 
 	opts := &azcosmos.QueryOptions{
@@ -293,8 +324,8 @@ func (db *cosmosDB) Scan(ctx context.Context, table string, startKey string, cou
 // other adapters' Insert semantics (Couchbase's dedicated Insert vs.
 // Upsert, Mongo's InsertOne).
 func (db *cosmosDB) Insert(ctx context.Context, table string, key string, values map[string][]byte) error {
-	if _, ok := values["id"]; ok {
-		return fmt.Errorf("Insert error: field named \"id\" collides with the id Cosmos DB requires this adapter to set from the record key")
+	if err := rejectSystemFieldNames(values); err != nil {
+		return fmt.Errorf("Insert error: %s", err.Error())
 	}
 	container, err := db.getContainer(ctx, table)
 	if err != nil {
@@ -347,6 +378,9 @@ func canUsePatchUpdate(values map[string][]byte) bool {
 // worker threads, two Updates landing on the same key at nearly the same
 // time is an expected, not exceptional, occurrence.
 func (db *cosmosDB) Update(ctx context.Context, table string, key string, values map[string][]byte) error {
+	if err := rejectSystemFieldNames(values); err != nil {
+		return fmt.Errorf("Update error: %s", err.Error())
+	}
 	container, err := db.getContainer(ctx, table)
 	if err != nil {
 		return err
@@ -445,6 +479,35 @@ func parseConsistencyLevel(p *properties.Properties) (*azcosmos.ConsistencyLevel
 	return nil, fmt.Errorf("unknown %s %q: expected one of %v", cosmosConsistencyLevel, raw, azcosmos.ConsistencyLevelValues())
 }
 
+// parseThroughputOptions builds the ThroughputProperties passed to container
+// creation when cosmosAutoCreateContainer is set. Both cosmosThroughput and
+// cosmosAutoscaleMaxThroughput provision real, billed RU/s, so a malformed
+// value here must be a hard config error at startup, not a silent fallback
+// to the platform-minimum default - a pure function (rather than inlined
+// into Create) so this parsing can be unit-tested without a live connection,
+// matching parseConsistencyLevel above.
+func parseThroughputOptions(p *properties.Properties) (*azcosmos.ThroughputProperties, error) {
+	if autoscaleStr, ok := p.Get(cosmosAutoscaleMaxThroughput); ok {
+		autoscaleMax, err := strconv.ParseInt(autoscaleStr, 10, 32)
+		if err != nil || autoscaleMax <= 0 {
+			return nil, fmt.Errorf("invalid %s %q: must be a positive integer", cosmosAutoscaleMaxThroughput, autoscaleStr)
+		}
+		t := azcosmos.NewAutoscaleThroughputProperties(int32(autoscaleMax))
+		return &t, nil
+	}
+
+	manual := int64(cosmosThroughputDefault)
+	if throughputStr, ok := p.Get(cosmosThroughput); ok {
+		var err error
+		manual, err = strconv.ParseInt(throughputStr, 10, 32)
+		if err != nil || manual <= 0 {
+			return nil, fmt.Errorf("invalid %s %q: must be a positive integer", cosmosThroughput, throughputStr)
+		}
+	}
+	t := azcosmos.NewManualThroughputProperties(int32(manual))
+	return &t, nil
+}
+
 func (c cosmosDBCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	endpoint := p.GetString(cosmosEndpoint, "")
 	key := p.GetString(cosmosKey, "")
@@ -469,19 +532,19 @@ func (c cosmosDBCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		}
 	}
 
+	scanTimeout := cosmosScanTimeoutDefault
+	if scanTimeoutStr, ok := p.Get(cosmosScanTimeout); ok {
+		scanTimeout, err = time.ParseDuration(scanTimeoutStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s %q: %w", cosmosScanTimeout, scanTimeoutStr, err)
+		}
+	}
+
 	var throughputOpts *azcosmos.ThroughputProperties
 	if autoCreate {
-		if autoscaleStr, ok := p.Get(cosmosAutoscaleMaxThroughput); ok {
-			var autoscaleMax int64
-			if _, err := fmt.Sscanf(autoscaleStr, "%d", &autoscaleMax); err != nil {
-				return nil, fmt.Errorf("invalid %s %q: %w", cosmosAutoscaleMaxThroughput, autoscaleStr, err)
-			}
-			t := azcosmos.NewAutoscaleThroughputProperties(int32(autoscaleMax))
-			throughputOpts = &t
-		} else {
-			manual := int64(p.GetInt(cosmosThroughput, int(cosmosThroughputDefault)))
-			t := azcosmos.NewManualThroughputProperties(int32(manual))
-			throughputOpts = &t
+		throughputOpts, err = parseThroughputOptions(p)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -494,6 +557,10 @@ func (c cosmosDBCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		clientOpts.ClientOptions.Transport = &http.Client{
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		}
+	}
+
+	if connStr != "" && (endpoint != "" || key != "") {
+		return nil, fmt.Errorf("cosmosdb: %s is set together with %s/%s - set only one connection method", cosmosConnectionString, cosmosEndpoint, cosmosKey)
 	}
 
 	var client *azcosmos.Client
@@ -513,10 +580,11 @@ func (c cosmosDBCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		return nil, fmt.Errorf("cosmosdb: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
-	defer cancel()
 	if autoCreate {
-		if _, err := client.CreateDatabase(ctx, azcosmos.DatabaseProperties{ID: databaseName}, nil); err != nil {
+		createCtx, createCancel := context.WithTimeout(context.Background(), opTimeout)
+		_, err := client.CreateDatabase(createCtx, azcosmos.DatabaseProperties{ID: databaseName}, nil)
+		createCancel()
+		if err != nil {
 			var respErr *azcore.ResponseError
 			if !errors.As(err, &respErr) || respErr.StatusCode != http.StatusConflict {
 				return nil, fmt.Errorf("cosmosdb: failed to create database %q: %w", databaseName, err)
@@ -527,7 +595,10 @@ func (c cosmosDBCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cosmosdb: %w", err)
 	}
-	if _, err := database.Read(ctx, nil); err != nil {
+	readCtx, readCancel := context.WithTimeout(context.Background(), opTimeout)
+	_, err = database.Read(readCtx, nil)
+	readCancel()
+	if err != nil {
 		return nil, fmt.Errorf("cosmosdb: database %q not reachable (does it exist? set %s=true to create it): %w", databaseName, cosmosAutoCreateContainer, err)
 	}
 	fmt.Printf("Connected to Cosmos DB! Using database %q\n", databaseName)
@@ -539,6 +610,7 @@ func (c cosmosDBCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		autoCreate:     autoCreate,
 		throughputOpts: throughputOpts,
 		opTimeout:      opTimeout,
+		scanTimeout:    scanTimeout,
 		consistency:    consistency,
 	}
 	return db, nil
