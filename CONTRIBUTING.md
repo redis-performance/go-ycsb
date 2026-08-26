@@ -72,6 +72,10 @@ make test-integration-couchbase
 
 # Cosmos DB adapter against a dockerized Azure Cosmos DB (vNext) emulator
 make test-integration-cosmosdb
+
+# Cosmos DB TLS support (via a TLS-terminating proxy, since the emulator
+# only serves plain HTTP)
+make test-integration-cosmosdb-tls
 ```
 
 **Adding a new database adapter capability (TLS, auth, a protocol change, etc.)?** Two things are required, not optional:

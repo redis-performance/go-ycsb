@@ -93,6 +93,16 @@ test-couchbase:
 test-integration-cosmosdb:
 	./test/integration/cosmosdb.sh
 
+# Runs db/cosmosdb/db.go's TLS support (cosmosdb.insecure_skip_verify)
+# against a dockerized Cosmos DB (vNext) Linux emulator behind a TLS-
+# terminating proxy (the emulator itself serves plain HTTP - see
+# test/integration/cosmosdb_tls.sh's header comment), asserting on
+# connection outcome in both directions: rejected by default against an
+# untrusted cert, accepted with insecure_skip_verify=true. Same target
+# locally and in CI.
+test-integration-cosmosdb-tls:
+	./test/integration/cosmosdb_tls.sh
+
 # Unit tests for db/cosmosdb specifically - see test-couchbase's comment for
 # why this isn't just `go test ./...`.
 test-cosmosdb:

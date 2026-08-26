@@ -119,3 +119,12 @@ jobs:
       # `make test-integration-cosmosdb`.
       - name: Cosmos DB adapter vs. dockerized Cosmos DB emulator
         run: make test-integration-cosmosdb
+
+      # test/integration/cosmosdb_tls.sh puts a TLS-terminating proxy in
+      # front of the same emulator (which itself only serves plain HTTP) to
+      # exercise cosmosdb.insecure_skip_verify in both directions - see its
+      # header comment for why this repo asserts on both, mirroring
+      # test/integration/aerospike_tls.sh's precedent for the same class of
+      # config knob.
+      - name: Cosmos DB adapter TLS support vs. a TLS-terminating proxy
+        run: make test-integration-cosmosdb-tls
