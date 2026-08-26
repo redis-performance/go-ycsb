@@ -179,22 +179,37 @@ echo "OK: auto_create_container=false correctly rejected writes to a nonexistent
 # PatchItem fast path: the fast path issues one atomic AppendSet per field
 # and structurally cannot drop an unrelated field, so a single-field Update
 # (writeallfields=false, the core workload's default) would never reach the
-# code this is meant to guard. FC_FIELDCOUNT is > cosmosMaxPatchOps (10) and
-# every Update writes all of them (writeallfields=true), so
-# canUsePatchUpdate returns false on every call and each Update is forced
-# through the fallback's Read+merge+Replace loop - then the raw stored
-# document is read back via a standalone probe program that calls
-# azcosmos.ReadItem directly, bypassing this adapter's Update() entirely so
-# a bug there can't be masked by anything Update itself does - and every
-# original field must still be present.
+# code this is meant to guard.
+#
+# The load and run phases deliberately use DIFFERENT fieldcounts, not the
+# same one: field names are generated as field0..field{fieldcount-1}
+# (pkg/workload/core.go), independently per go-ycsb invocation, so loading
+# with FC_LOAD_FIELDCOUNT and then running writeallfields=true updates with
+# a SMALLER FC_RUN_FIELDCOUNT means every Update's values map only ever
+# covers field0..field{FC_RUN_FIELDCOUNT-1} - field{FC_RUN_FIELDCOUNT}..
+# field{FC_LOAD_FIELDCOUNT-1} are never mentioned by any Update call. Using
+# the SAME fieldcount for both (an earlier version of this check did) makes
+# values already equal the whole document on every call, so a blind
+# Replace(values+id) - exactly the bug class this guards against - would
+# also leave the stored field count unchanged and the check could not
+# actually fail. FC_RUN_FIELDCOUNT still has to stay > cosmosMaxPatchOps
+# (10) so canUsePatchUpdate keeps returning false and the fallback still
+# fires on every Update.
+#
+# The raw stored document is read back via a standalone probe program that
+# calls azcosmos.ReadItem directly, bypassing this adapter's Update()
+# entirely so a bug there can't be masked by anything Update itself does -
+# and every field from the wider load, including the ones no Update ever
+# mentioned, must still be present.
 echo "==> [field preservation] Update()'s Read+merge+Replace fallback must not drop fields"
 FC_TABLE=fieldpreservetest
-FC_FIELDCOUNT=15
-OUT=$(run_phase load workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_FIELDCOUNT" \
+FC_LOAD_FIELDCOUNT=20
+FC_RUN_FIELDCOUNT=15
+OUT=$(run_phase load workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_LOAD_FIELDCOUNT" \
   -p insertorder=ordered -p recordcount=1 -p operationcount=1 -p threadcount=1)
 echo "$OUT" | tail -5
 check_output "$OUT" INSERT 1
-OUT=$(run_phase run workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_FIELDCOUNT" \
+OUT=$(run_phase run workloads/workload_template -p table="$FC_TABLE" -p fieldcount="$FC_RUN_FIELDCOUNT" \
   -p insertorder=ordered -p recordcount=1 -p operationcount=30 -p threadcount=1 \
   -p readproportion=0 -p updateproportion=1 -p writeallfields=true)
 echo "$OUT" | tail -5
@@ -241,17 +256,17 @@ func main() {
 		}
 	}
 	fmt.Println(count)
-	if count != $FC_FIELDCOUNT {
+	if count != $FC_LOAD_FIELDCOUNT {
 		os.Exit(1)
 	}
 }
 EOF
 
 got_fields=$(cd "$ROOT_DIR" && go run "$WORK_DIR/probe.go")
-if [ "$got_fields" != "$FC_FIELDCOUNT" ]; then
-  echo "FAIL: expected all $FC_FIELDCOUNT fields to survive 30 full-document (Read+merge+Replace fallback) updates, found $got_fields"
+if [ "$got_fields" != "$FC_LOAD_FIELDCOUNT" ]; then
+  echo "FAIL: expected all $FC_LOAD_FIELDCOUNT fields (including the $((FC_LOAD_FIELDCOUNT - FC_RUN_FIELDCOUNT)) never touched by any Update) to survive 30 Read+merge+Replace fallback updates, found $got_fields"
   exit 1
 fi
-echo "OK: all $FC_FIELDCOUNT fields survived 30 Read+merge+Replace fallback updates"
+echo "OK: all $FC_LOAD_FIELDCOUNT fields survived 30 Read+merge+Replace fallback updates (only field0..field$((FC_RUN_FIELDCOUNT - 1)) were ever touched)"
 
 echo "==> cosmosdb integration test passed"
