@@ -19,6 +19,16 @@ type histograms struct {
 
 	mu         sync.RWMutex
 	histograms map[string]*histogram
+
+	iv intervals
+	// windows: per-interval histograms are kept (an interval output file is
+	// set). Set before the first Measure and never changed after, so runs
+	// without the file pay only for the cumulative histograms.
+	windows bool
+	// cut makes an interval cut atomic across operations: recording holds it
+	// shared, a cut holds it exclusively while it takes every window (only with
+	// windows).
+	cut sync.RWMutex
 }
 
 func (h *histograms) GenerateExtendedOutputs() {
@@ -48,6 +58,10 @@ func (h *histograms) GenerateExtendedOutputs() {
 }
 
 func (h *histograms) Measure(op string, start time.Time, lan time.Duration) {
+	if h.windows {
+		h.cut.RLock()
+		defer h.cut.RUnlock()
+	}
 	// Fast path: try to get histogram with read lock
 	h.mu.RLock()
 	opM, ok := h.histograms[op]
@@ -59,7 +73,7 @@ func (h *histograms) Measure(op string, start time.Time, lan time.Duration) {
 		// Double-check after acquiring write lock
 		opM, ok = h.histograms[op]
 		if !ok {
-			opM = newHistogram()
+			opM = newHistogram(h.windows)
 			h.histograms[op] = opM
 		}
 		h.mu.Unlock()
@@ -117,4 +131,16 @@ func InitHistograms(p *properties.Properties) *histograms {
 		p:          p,
 		histograms: make(map[string]*histogram, 16),
 	}
+}
+
+// IntervalStart starts the reporting intervals (at the end of warm-up).
+func (h *histograms) IntervalStart(now time.Time) { h.startIntervals(now) }
+
+// IntervalTick ends a reporting interval and writes its records.
+func (h *histograms) IntervalTick(now time.Time) { h.writeInterval(now) }
+
+// IntervalClose writes the last (partial) interval and closes the file.
+func (h *histograms) IntervalClose(now time.Time) {
+	h.writeInterval(now)
+	h.closeIntervals()
 }

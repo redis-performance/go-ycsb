@@ -53,6 +53,12 @@ test-integration-feature-store:
 test-integration-stop-signal:
 	./test/integration/stop_signal.sh
 
+# Runs a 1s-interval run against a dockerized Redis, stopped with SIGINT, and
+# checks measurement.interval_output_file: one line per operation per interval,
+# counts adding up to the final summary, the last partial interval included.
+test-integration-interval-output:
+	./test/integration/interval_output.sh
+
 # Runs db/cassandra/db.go's TLS support against a dockerized, TLS-enabled
 # ScyllaDB node, asserting both that a connection using the correct CA
 # succeeds AND that one using an unrelated CA is rejected - the second

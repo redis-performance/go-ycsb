@@ -22,8 +22,16 @@ import (
 
 	"github.com/magiconair/properties"
 	"github.com/pingcap/go-ycsb/pkg/prop"
+	"github.com/pingcap/go-ycsb/pkg/util"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
 )
+
+// intervalMeasurer is a Measurer that also reports per interval (histogram).
+type intervalMeasurer interface {
+	IntervalStart(now time.Time)
+	IntervalTick(now time.Time)
+	IntervalClose(now time.Time)
+}
 
 var header = []string{"Operation", "Takes(s)", "Count", "OPS", "Avg(us)", "Min(us)", "Max(us)", "50th(us)", "90th(us)", "95th(us)", "99th(us)", "99.9th(us)", "99.99th(us)"}
 
@@ -39,6 +47,7 @@ type measurement struct {
 	p *properties.Properties
 
 	measurer ycsb.Measurer
+	interval time.Duration
 }
 
 var measureChan chan measureEvent
@@ -88,10 +97,25 @@ func InitMeasure(p *properties.Properties) {
 	globalMeasure = new(measurement)
 	globalMeasure.p = p
 	measurementType := p.GetString(prop.MeasurementType, prop.MeasurementTypeDefault)
+	interval, err := ParseInterval(p)
+	if err != nil {
+		util.Fatalf("%v", err)
+	}
+	globalMeasure.interval = interval
+	intervalFile := p.GetString(prop.MeasurementIntervalOutputFile, "")
 	switch measurementType {
 	case "histogram":
-		globalMeasure.measurer = InitHistograms(p)
+		h := InitHistograms(p)
+		if intervalFile != "" {
+			if err := h.openIntervals(intervalFile); err != nil {
+				util.Fatalf("%v", err)
+			}
+		}
+		globalMeasure.measurer = h
 	case "raw", "csv":
+		if intervalFile != "" {
+			util.Fatalf("%s needs %s=histogram", prop.MeasurementIntervalOutputFile, prop.MeasurementType)
+		}
 		globalMeasure.measurer = InitCSV()
 	default:
 		panic("unsupported measurement type: " + measurementType)
@@ -108,12 +132,35 @@ func InitMeasure(p *properties.Properties) {
 	}()
 }
 
+// ReportInterval is the reporting interval (prop.LogInterval).
+func ReportInterval() time.Duration {
+	return globalMeasure.interval
+}
+
+// StartIntervals starts the reporting intervals; call it when warm-up ends.
+func StartIntervals() {
+	if im, ok := globalMeasure.measurer.(intervalMeasurer); ok {
+		im.IntervalStart(time.Now())
+	}
+}
+
+// IntervalTick ends a reporting interval (after the status lines).
+func IntervalTick() {
+	if im, ok := globalMeasure.measurer.(intervalMeasurer); ok {
+		im.IntervalTick(time.Now())
+	}
+}
+
 // Output prints the complete measurements.
 func Output() {
 	measureOnce.Do(func() {
 		close(measureChan)
 		measureWg.Wait()
 	})
+	// every sample is recorded now: the last, partial interval is complete
+	if im, ok := globalMeasure.measurer.(intervalMeasurer); ok {
+		im.IntervalClose(time.Now())
+	}
 	globalMeasure.measurer.GenerateExtendedOutputs()
 	globalMeasure.output()
 }

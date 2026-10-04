@@ -190,15 +190,16 @@ func (c *Client) Run(ctx context.Context) {
 		}
 		// finish warming up
 		measurement.EnableWarmUp(false)
+		measurement.StartIntervals()
 
-		dur := c.p.GetInt64(prop.LogInterval, 10)
-		t := time.NewTicker(time.Duration(dur) * time.Second)
+		t := time.NewTicker(measurement.ReportInterval())
 		defer t.Stop()
 
 		for {
 			select {
 			case <-t.C:
 				measurement.Summary()
+				measurement.IntervalTick()
 			case <-measureCtx.Done():
 				return
 			}

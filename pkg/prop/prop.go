@@ -13,6 +13,8 @@
 
 package prop
 
+import "time"
+
 // Properties
 const (
 	InsertStart        = "insertstart"
@@ -159,7 +161,13 @@ const (
 	KeyPrefix        = "keyprefix"
 	KeyPrefixDefault = "user"
 
-	LogInterval = "measurement.interval"
+	// LogInterval is the reporting interval: a Go duration ("1s", "500ms") or
+	// a number of seconds.
+	LogInterval        = "measurement.interval"
+	LogIntervalDefault = 10 * time.Second
+	// MeasurementIntervalOutputFile, when set, gets one JSON line per operation
+	// per reporting interval (histogram measurement only).
+	MeasurementIntervalOutputFile = "measurement.interval_output_file"
 
 	MeasurementType          = "measurementtype"
 	MeasurementTypeDefault   = "histogram"
