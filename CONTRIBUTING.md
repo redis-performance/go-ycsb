@@ -80,8 +80,8 @@ make test-integration-cosmosdb
 # only serves plain HTTP)
 make test-integration-cosmosdb-tls
 
-# measurement and reporting (pkg/measurement, the status lines, stop signals):
-# per-interval output against Redis, and a SIGINT delivered twice
+# Per-interval output (pkg/measurement, measurement.interval_output_file)
+# against dockerized Redis
 make test-integration-interval-output
 ```
 
