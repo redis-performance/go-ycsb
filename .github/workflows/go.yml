@@ -20,8 +20,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -40,19 +38,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         if: github.event_name == 'push'
         with:
-          name: Latest Build
+          name: Latest Build ${{ github.sha }}
           tag_name: latest-${{ github.sha }}
           files: |
             *.tar.gz
-      - name: Clean legacy latest releases
-        uses: actions/github-script@v6
-        if: github.event_name == 'push'
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const releases = (await github.rest.repos.listReleases({ owner, repo })).data.filter(r => r.draft && r.tag_name.startsWith('latest'));
-            for (const r of releases) { await github.rest.repos.deleteRelease({ owner, repo, release_id: r.id }).catch(_ => {}); }
-      - name: Clean legacy latest tags
-        if: github.event_name == 'push'
-        run: |
-          git tag -l | grep latest | grep -v latest-${{ github.sha }} | xargs -I{} git push -d origin {} || true
+      # Older latest-<sha> tags and releases are kept: consumers pin a latest-<sha>
+      # release URL for reproducible builds, and deleting it on the next master push
+      # breaks every such pin.
