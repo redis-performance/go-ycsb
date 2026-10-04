@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+#
+# Integration test for the stop-signal handling against a real, dockerized
+# Redis: a run stopped with SIGINT must end with its final summary
+# ("Run finished"), also when the same SIGINT arrives twice back to back, which
+# is how GNU timeout(1) delivers it (to the command, then to its process group).
+#
+# Same script for local dev and CI: by default it starts (and tears down) its own
+# disposable Redis container. Set START_CONTAINERS=false and REDIS_ADDR to reuse
+# an existing Redis.
+#
+# Usage:
+#   test/integration/stop_signal.sh
+#
+# Env overrides:
+#   TRIES            runs per case (default: 3)
+#   REDIS_IMAGE      docker image for Redis (default: redis:8)
+#   REDIS_PORT       host port to publish Redis on (default: a free port docker picks)
+#   START_CONTAINERS whether to start/stop the container (default: true)
+#   REDIS_ADDR       redis.addr to use when START_CONTAINERS=false
+
+set -euo pipefail
+
+TRIES=${TRIES:-3}
+REDIS_IMAGE=${REDIS_IMAGE:-redis:8}
+REDIS_PORT=${REDIS_PORT:-}
+START_CONTAINERS=${START_CONTAINERS:-true}
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$ROOT_DIR"
+
+WORK=$(mktemp -d)
+# unique per run, so concurrent runs (two people, two CI jobs) don't collide
+REDIS_CONTAINER=go-ycsb-it-signal-redis-$(basename "$WORK")
+
+cleanup() {
+  rm -rf "$WORK"
+  if [ "$START_CONTAINERS" = "true" ]; then
+    docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+if [ "$START_CONTAINERS" = "true" ]; then
+  echo "==> starting $REDIS_IMAGE"
+  docker run -d --rm --name "$REDIS_CONTAINER" -p "127.0.0.1:${REDIS_PORT}:6379" "$REDIS_IMAGE" >/dev/null
+  REDIS_PORT=$(docker port "$REDIS_CONTAINER" 6379/tcp | head -n 1 | sed 's/.*://')
+  echo "    on 127.0.0.1:$REDIS_PORT"
+  for _ in $(seq 1 30); do
+    docker exec "$REDIS_CONTAINER" redis-cli ping >/dev/null 2>&1 && break
+    sleep 1
+  done
+fi
+REDIS_ADDR=${REDIS_ADDR:-127.0.0.1:${REDIS_PORT:-16380}}
+
+echo "==> building go-ycsb"
+go build -o "$WORK/go-ycsb" ./cmd/go-ycsb
+
+common=(-P workloads/workloada -p "redis.addr=${REDIS_ADDR}" -p recordcount=10000)
+"$WORK/go-ycsb" load redis "${common[@]}" -p threadcount=8 >/dev/null
+
+check() { # $1: log, $2: case, $3: try, $4: rc
+  if ! grep -q "Run finished" "$1" || grep -q "again to exit" "$1"; then
+    echo "FAIL: $2 lost the final summary (try $3, rc $4)"
+    cat "$1"
+    exit 1
+  fi
+}
+
+echo "==> the same SIGINT delivered twice, back to back, still ends with the final summary"
+# The old handler lost the summary in about 9 of 10 such runs, so a few tries
+# catch a regression all but certainly.
+for try in $(seq 1 "$TRIES"); do
+  "$WORK/go-ycsb" run redis "${common[@]}" -p operationcount=1000000000 -p threadcount=8 >"$WORK/dup.log" 2>&1 &
+  pid=$!
+  sleep 2
+  kill -INT "$pid" 2>/dev/null || true
+  kill -INT "$pid" 2>/dev/null || true
+  rc=0
+  wait "$pid" || rc=$?
+  check "$WORK/dup.log" "a SIGINT delivered twice" "$try" "$rc"
+done
+
+echo "==> a run bounded by timeout -s INT ends with the final summary"
+for try in $(seq 1 "$TRIES"); do
+  rc=0
+  timeout -s INT 3 "$WORK/go-ycsb" run redis "${common[@]}" -p operationcount=1000000000 -p threadcount=8 >"$WORK/timeout.log" 2>&1 || rc=$?
+  if [ "$rc" != 124 ]; then
+    echo "FAIL: expected the run to be stopped by timeout (rc 124), got rc $rc (try $try)"
+    cat "$WORK/timeout.log"
+    exit 1
+  fi
+  check "$WORK/timeout.log" "a run stopped by timeout -s INT" "$try" "$rc"
+done
+
+echo "ok: $TRIES runs per case ended with the final summary"
