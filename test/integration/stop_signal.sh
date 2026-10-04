@@ -13,7 +13,8 @@
 #   test/integration/stop_signal.sh
 #
 # Env overrides:
-#   TRIES            runs per case (default: 10)
+#   TRIES_BACK_TO_BACK runs of the back-to-back case (default: 20)
+#   TRIES            runs of the timeout -s INT case (default: 10)
 #   REDIS_IMAGE      docker image for Redis (default: redis:8)
 #   REDIS_PORT       host port to publish Redis on (default: a free port docker picks)
 #   START_CONTAINERS whether to start/stop the container (default: true)
@@ -21,7 +22,11 @@
 
 set -euo pipefail
 
+TRIES_BACK_TO_BACK=${TRIES_BACK_TO_BACK:-20}
 TRIES=${TRIES:-10}
+# Upper bound on one stopped run: the stop handler force-exits after 10 s, so
+# anything longer is a hang, which fails the try instead of stalling the job.
+RUN_LIMIT=30
 REDIS_IMAGE=${REDIS_IMAGE:-redis:8}
 REDIS_PORT=${REDIS_PORT:-}
 START_CONTAINERS=${START_CONTAINERS:-true}
@@ -57,7 +62,7 @@ echo "==> building go-ycsb"
 go build -o "$WORK/go-ycsb" ./cmd/go-ycsb
 
 common=(-P workloads/workloada -p "redis.addr=${REDIS_ADDR}" -p recordcount=10000)
-"$WORK/go-ycsb" load redis "${common[@]}" -p threadcount=8 >/dev/null
+timeout -k 5 120 "$WORK/go-ycsb" load redis "${common[@]}" -p threadcount=8 >/dev/null
 
 check() { # $1: log, $2: case, $3: try, $4: rc
   if ! grep -q "Run finished" "$1" || grep -q "again to exit" "$1"; then
@@ -68,24 +73,35 @@ check() { # $1: log, $2: case, $3: try, $4: rc
 }
 
 echo "==> the same SIGINT delivered twice, back to back, still ends with the final summary"
-# The old handler lost the summary in about 1 of 5 such runs (and in about 2
-# of 5 runs stopped by timeout -s INT, below), measured on a laptop: 10 tries
-# per case together miss a regression in well under 1% of runs.
-for try in $(seq 1 "$TRIES"); do
+# The old handler lost the summary in about 1 of 5 such runs, and in about 2
+# of 5 runs stopped by timeout -s INT (below), measured on a laptop. So each
+# case on its own misses a regression that only breaks it in about
+# 0.8^20 = 1.2% (20 tries) and 0.6^10 = 0.6% (10 tries) of runs.
+for try in $(seq 1 "$TRIES_BACK_TO_BACK"); do
   "$WORK/go-ycsb" run redis "${common[@]}" -p operationcount=1000000000 -p threadcount=8 >"$WORK/dup.log" 2>&1 &
   pid=$!
   sleep 2
   kill -INT "$pid" 2>/dev/null || true
   kill -INT "$pid" 2>/dev/null || true
+  # bound the wait: a hung run is killed, and then fails the check below
+  ( sleep "$RUN_LIMIT"; kill -KILL "$pid" 2>/dev/null ) &
+  watchdog=$!
   rc=0
   wait "$pid" || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  if [ "$rc" = 137 ]; then
+    echo "FAIL: a SIGINT delivered twice: the run hung for ${RUN_LIMIT}s and was killed (try $try)"
+    cat "$WORK/dup.log"
+    exit 1
+  fi
   check "$WORK/dup.log" "a SIGINT delivered twice" "$try" "$rc"
 done
 
 echo "==> a run bounded by timeout -s INT ends with the final summary"
 for try in $(seq 1 "$TRIES"); do
   rc=0
-  timeout -s INT 3 "$WORK/go-ycsb" run redis "${common[@]}" -p operationcount=1000000000 -p threadcount=8 >"$WORK/timeout.log" 2>&1 || rc=$?
+  timeout -k "$RUN_LIMIT" -s INT 3 "$WORK/go-ycsb" run redis "${common[@]}" -p operationcount=1000000000 -p threadcount=8 >"$WORK/timeout.log" 2>&1 || rc=$?
   if [ "$rc" != 124 ]; then
     echo "FAIL: expected the run to be stopped by timeout (rc 124), got rc $rc (try $try)"
     cat "$WORK/timeout.log"
@@ -94,4 +110,4 @@ for try in $(seq 1 "$TRIES"); do
   check "$WORK/timeout.log" "a run stopped by timeout -s INT" "$try" "$rc"
 done
 
-echo "ok: $TRIES runs per case ended with the final summary"
+echo "ok: $TRIES_BACK_TO_BACK back-to-back and $TRIES timeout runs ended with the final summary"
