@@ -247,6 +247,19 @@ func TestIntervalWriteErrorIsReturned(t *testing.T) {
 	}
 }
 
+// A close that fails on its own (everything written and flushed) is returned
+// too: the file may not be on disk as written.
+func TestIntervalCloseErrorIsReturned(t *testing.T) {
+	h := InitHistograms(properties.NewProperties())
+	if err := h.openIntervals(filepath.Join(t.TempDir(), "intervals.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	h.iv.file.Close() // nothing buffered, so only the close itself fails
+	if err := h.closeIntervals(); !errors.Is(err, os.ErrClosed) || !strings.Contains(err.Error(), "interval output file") {
+		t.Errorf("closeIntervals = %v, want the close error", err)
+	}
+}
+
 // The client's DB wrapper measures each successful operation and then TOTAL
 // (a failed one only as <op>_ERROR, with no TOTAL). A cut takes every
 // operation's window before summarising any, so in every interval TOTAL equals
