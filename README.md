@@ -156,7 +156,7 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
 |-|-|-|
 |measurementtype|"histogram"|The mechanism for recording measurements, one of `histogram`, `raw` or `csv`|
 |measurement.output_file|""|File to write output to, default writes to stdout|
-|measurement.interval|10s|How often the status lines (and interval records) are written: a Go duration such as `1s` or `500ms`, or a number of seconds; at least `100ms`. `--interval <seconds>` sets it too|
+|measurement.interval|10s|How often the status lines (and interval records) are written: a Go duration such as `1s` or `500ms`, or a number of seconds; at least `100ms`. `--interval <seconds>` sets it too, in whole seconds only: for a sub-second interval use `-p measurement.interval`|
 |measurement.interval_output_file|""|With `measurementtype=histogram`: a file that gets one JSON line per operation per interval, with that interval's own latency percentiles (the status lines' percentiles are cumulative since the start)|
 
 Each line of `measurement.interval_output_file` describes one operation over one interval, e.g.:

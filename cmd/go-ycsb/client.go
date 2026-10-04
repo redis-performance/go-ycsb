@@ -83,7 +83,7 @@ func initClientCommand(m *cobra.Command) {
 	m.Flags().StringVar(&tableName, "table", "", "Use the table name instead of the default \""+prop.TableNameDefault+"\"")
 	m.Flags().IntVar(&threadsArg, "threads", 1, "Execute using n threads - can also be specified as the \"threadcount\" property")
 	m.Flags().IntVar(&targetArg, "target", 0, "Attempt to do n operations per second (default: unlimited) - can also be specified as the \"target\" property")
-	m.Flags().IntVar(&reportInterval, "interval", 10, "Interval of outputting measurements in seconds")
+	m.Flags().IntVar(&reportInterval, "interval", 10, "Interval of outputting measurements in whole seconds (for sub-second intervals use -p measurement.interval=500ms)")
 }
 
 func newLoadCommand() *cobra.Command {
