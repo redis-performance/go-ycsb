@@ -38,7 +38,10 @@ WORK=$(mktemp -d)
 # unique per run, so concurrent runs (two people, two CI jobs) don't collide
 REDIS_CONTAINER=go-ycsb-it-signal-redis-$(basename "$WORK")
 
+pid=
 cleanup() {
+  # a run still in the background (the script itself was killed) goes too
+  if [ -n "$pid" ]; then kill -KILL "$pid" 2>/dev/null || true; fi
   rm -rf "$WORK"
   if [ "$START_CONTAINERS" = "true" ]; then
     docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
@@ -83,15 +86,24 @@ for try in $(seq 1 "$TRIES_BACK_TO_BACK"); do
   sleep 2
   kill -INT "$pid" 2>/dev/null || true
   kill -INT "$pid" 2>/dev/null || true
-  # bound the wait: a hung run is killed, and then fails the check below
-  ( sleep "$RUN_LIMIT"; kill -KILL "$pid" 2>/dev/null ) &
+  # bound the wait: a hung run is killed, and then fails the check below.
+  # Killing the watchdog also stops its sleep (the TERM trap), and its output
+  # goes nowhere, so nothing left over holds the script's stdout open.
+  (
+    sleep "$RUN_LIMIT" &
+    s=$!
+    trap 'kill "$s" 2>/dev/null; exit 0' TERM
+    wait "$s"
+    kill -KILL "$pid" 2>/dev/null
+  ) >/dev/null 2>&1 &
   watchdog=$!
   rc=0
   wait "$pid" || rc=$?
   kill "$watchdog" 2>/dev/null || true
   wait "$watchdog" 2>/dev/null || true
+  pid=
   if [ "$rc" = 137 ]; then
-    echo "FAIL: a SIGINT delivered twice: the run hung for ${RUN_LIMIT}s and was killed (try $try)"
+    echo "FAIL: a SIGINT delivered twice: hung: watchdog killed go-ycsb after ${RUN_LIMIT} s (try $try)"
     cat "$WORK/dup.log"
     exit 1
   fi
@@ -102,6 +114,11 @@ echo "==> a run bounded by timeout -s INT ends with the final summary"
 for try in $(seq 1 "$TRIES"); do
   rc=0
   timeout -k "$RUN_LIMIT" -s INT 3 "$WORK/go-ycsb" run redis "${common[@]}" -p operationcount=1000000000 -p threadcount=8 >"$WORK/timeout.log" 2>&1 || rc=$?
+  if [ "$rc" = 137 ]; then
+    echo "FAIL: a run stopped by timeout -s INT: hung: timeout killed go-ycsb ${RUN_LIMIT} s after the SIGINT (try $try)"
+    cat "$WORK/timeout.log"
+    exit 1
+  fi
   if [ "$rc" != 124 ]; then
     echo "FAIL: expected the run to be stopped by timeout (rc 124), got rc $rc (try $try)"
     cat "$WORK/timeout.log"
