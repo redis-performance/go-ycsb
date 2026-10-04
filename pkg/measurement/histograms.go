@@ -139,8 +139,9 @@ func (h *histograms) IntervalStart(now time.Time) { h.startIntervals(now) }
 // IntervalTick ends a reporting interval and writes its records.
 func (h *histograms) IntervalTick(now time.Time) { h.writeInterval(now) }
 
-// IntervalClose writes the last (partial) interval and closes the file.
-func (h *histograms) IntervalClose(now time.Time) {
+// IntervalClose writes the last (partial) interval and closes the file. It
+// returns the first error the interval output file hit.
+func (h *histograms) IntervalClose(now time.Time) error {
 	h.writeInterval(now)
-	h.closeIntervals()
+	return h.closeIntervals()
 }

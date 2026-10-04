@@ -3,6 +3,7 @@ package measurement
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -121,7 +122,9 @@ func TestIntervalOutputFile(t *testing.T) {
 	h.Measure("READ_ERROR", t0, 7*time.Microsecond)
 	h.IntervalTick(t0.Add(time.Second))
 	h.Measure("READ", t0, 50*time.Microsecond)
-	h.IntervalClose(t0.Add(1500 * time.Millisecond)) // the last, partial interval
+	if err := h.IntervalClose(t0.Add(1500 * time.Millisecond)); err != nil { // the last, partial interval
+		t.Fatal(err)
+	}
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -195,9 +198,52 @@ func TestNoIntervalBeforeStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.Measure("READ", time.Now(), time.Microsecond)
-	h.IntervalClose(time.Now()) // the run ended in warm-up
+	if err := h.IntervalClose(time.Now()); err != nil { // the run ended in warm-up
+		t.Fatal(err)
+	}
 	if b, _ := os.ReadFile(path); len(b) != 0 {
 		t.Errorf("wrote %q before the intervals started", b)
+	}
+}
+
+// A cut before the intervals start (still in warm-up) has no interval to end:
+// it returns nothing rather than records timed from the zero time.
+func TestCutBeforeStart(t *testing.T) {
+	h := InitHistograms(properties.NewProperties())
+	h.windows = true
+	h.Measure("READ", time.Now(), time.Microsecond)
+	if recs := h.cutInterval(time.Now()); recs != nil {
+		t.Errorf("cut %+v before the intervals started", recs)
+	}
+}
+
+// An interval file that can't be written fails the run: IntervalClose returns
+// the error (go-ycsb exits non-zero after the summary) instead of leaving a
+// truncated file that looks complete.
+func TestIntervalWriteErrorIsReturned(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "intervals.jsonl")
+	h := InitHistograms(properties.NewProperties())
+	if err := h.openIntervals(path); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now()
+	h.IntervalStart(t0)
+	h.Measure("READ", time.Now(), time.Microsecond)
+	h.iv.file.Close() // every later write and flush fails
+	h.IntervalTick(t0.Add(time.Second))
+	if err := h.IntervalClose(t0.Add(1500 * time.Millisecond)); err == nil || !strings.Contains(err.Error(), "interval output file") {
+		t.Errorf("IntervalClose = %v, want the write error", err)
+	}
+
+	// and a clean run returns nil
+	h = InitHistograms(properties.NewProperties())
+	if err := h.openIntervals(filepath.Join(t.TempDir(), "ok.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	h.IntervalStart(t0)
+	h.Measure("READ", time.Now(), time.Microsecond)
+	if err := h.IntervalClose(t0.Add(time.Second)); err != nil {
+		t.Errorf("IntervalClose = %v on a writable file", err)
 	}
 }
 
@@ -365,13 +411,17 @@ func TestIntervalWriteErrorReportedOnce(t *testing.T) {
 	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	h.IntervalStart(t0)
 	h.Measure("READ", t0, time.Microsecond)
+	var closeErr error
 	out := captureStderr(t, func() {
 		h.IntervalTick(t0.Add(time.Second))
 		h.Measure("READ", t0, time.Microsecond)
 		h.IntervalTick(t0.Add(2 * time.Second))
-		h.IntervalClose(t0.Add(2500 * time.Millisecond))
+		closeErr = h.IntervalClose(t0.Add(2500 * time.Millisecond))
 	})
 	if n := strings.Count(out, errWriteFailed.Error()); n != 1 {
 		t.Errorf("write error printed %d times, want once:\n%s", n, out)
+	}
+	if !errors.Is(closeErr, errWriteFailed) {
+		t.Errorf("IntervalClose = %v, want the write error, so the run fails", closeErr)
 	}
 }

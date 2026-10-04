@@ -30,7 +30,7 @@ import (
 type intervalMeasurer interface {
 	IntervalStart(now time.Time)
 	IntervalTick(now time.Time)
-	IntervalClose(now time.Time)
+	IntervalClose(now time.Time) error
 }
 
 var header = []string{"Operation", "Takes(s)", "Count", "OPS", "Avg(us)", "Min(us)", "Max(us)", "50th(us)", "90th(us)", "95th(us)", "99th(us)", "99.9th(us)", "99.99th(us)"}
@@ -151,18 +151,21 @@ func IntervalTick() {
 	}
 }
 
-// Output prints the complete measurements.
-func Output() {
+// Output prints the complete measurements. The error is the interval output
+// file's: the summary is printed regardless, and the caller decides how to fail.
+func Output() error {
 	measureOnce.Do(func() {
 		close(measureChan)
 		measureWg.Wait()
 	})
 	// every sample is recorded now: the last, partial interval is complete
+	var err error
 	if im, ok := globalMeasure.measurer.(intervalMeasurer); ok {
-		im.IntervalClose(time.Now())
+		err = im.IntervalClose(time.Now())
 	}
 	globalMeasure.measurer.GenerateExtendedOutputs()
 	globalMeasure.output()
+	return err
 }
 
 // Summary prints the measurement summary.

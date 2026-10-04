@@ -94,13 +94,13 @@ func (h *histograms) cutInterval(now time.Time) []IntervalRecord {
 	return h.cutIntervalLocked(now)
 }
 
-// cutIntervalLocked is cutInterval with iv.mu held. It runs only after
-// startIntervals: writeInterval cuts nothing before it. Every operation's window is
-// taken first, with recording held off (histograms.cut), and only then
+// cutIntervalLocked is cutInterval with iv.mu held. Before startIntervals (the
+// run is still in warm-up, or ended in it) there is no interval, so it cuts
+// nothing. Every operation's window is taken first, with recording held off (histograms.cut), and only then
 // summarised, so the windows end at the same instant: TOTAL matches the sum of
 // the other operations up to an operation whose TOTAL falls in the next interval.
 func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
-	if !h.windows {
+	if !h.windows || h.iv.start.IsZero() {
 		return nil
 	}
 	window := now.Sub(h.iv.last).Seconds()
@@ -151,10 +151,7 @@ func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
 func (h *histograms) writeInterval(now time.Time) {
 	h.iv.mu.Lock()
 	defer h.iv.mu.Unlock()
-	if h.iv.start.IsZero() { // the run ended in warm-up: no interval
-		return
-	}
-	if h.iv.out == nil || h.iv.err != nil {
+	if h.iv.out == nil || h.iv.err != nil || h.iv.start.IsZero() { // no file, a failed one, or still in warm-up
 		return
 	}
 	recs := h.cutIntervalLocked(now)
@@ -173,28 +170,26 @@ func (h *histograms) writeInterval(now time.Time) {
 	}
 }
 
-// closeIntervals flushes and closes the interval output file.
-func (h *histograms) closeIntervals() {
+// closeIntervals flushes and closes the interval output file. It returns the
+// first error writing, flushing or closing it, so the run can fail on an
+// incomplete file instead of ending as if it were whole.
+func (h *histograms) closeIntervals() error {
 	h.iv.mu.Lock()
 	defer h.iv.mu.Unlock()
 	if h.iv.file == nil {
-		return
+		return h.iv.err
 	}
-	reported := h.iv.err != nil // writeInterval has printed it already
-	if !reported {
+	if h.iv.err == nil {
 		h.iv.err = h.iv.out.Flush()
 	}
-	closeErr := h.iv.file.Close()
-	switch {
-	case !reported && h.iv.err == nil && closeErr != nil:
-		h.iv.err = closeErr
-		fallthrough
-	case !reported && h.iv.err != nil:
-		fmt.Fprintf(os.Stderr, "interval output: %v\n", h.iv.err)
-	case reported && closeErr != nil:
-		fmt.Fprintf(os.Stderr, "interval output: %v\n", closeErr)
+	if err := h.iv.file.Close(); h.iv.err == nil {
+		h.iv.err = err
 	}
 	h.iv.file, h.iv.out = nil, nil
+	if h.iv.err != nil {
+		return fmt.Errorf("interval output file: %w", h.iv.err)
+	}
+	return nil
 }
 
 func (h *histograms) openIntervals(path string) error {
