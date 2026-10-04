@@ -94,16 +94,14 @@ func (h *histograms) cutInterval(now time.Time) []IntervalRecord {
 	return h.cutIntervalLocked(now)
 }
 
-// cutIntervalLocked is cutInterval with iv.mu held. Every operation's window is
+// cutIntervalLocked is cutInterval with iv.mu held. It runs only after
+// startIntervals: writeInterval cuts nothing before it. Every operation's window is
 // taken first, with recording held off (histograms.cut), and only then
 // summarised, so the windows end at the same instant: TOTAL matches the sum of
 // the other operations up to an operation whose TOTAL falls in the next interval.
 func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
 	if !h.windows {
 		return nil
-	}
-	if h.iv.start.IsZero() {
-		h.iv.start, h.iv.last = now, now
 	}
 	window := now.Sub(h.iv.last).Seconds()
 	t := now.Sub(h.iv.start).Seconds()
