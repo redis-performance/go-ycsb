@@ -13,7 +13,7 @@
 #   test/integration/stop_signal.sh
 #
 # Env overrides:
-#   TRIES            runs per case (default: 3)
+#   TRIES            runs per case (default: 10)
 #   REDIS_IMAGE      docker image for Redis (default: redis:8)
 #   REDIS_PORT       host port to publish Redis on (default: a free port docker picks)
 #   START_CONTAINERS whether to start/stop the container (default: true)
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-TRIES=${TRIES:-3}
+TRIES=${TRIES:-10}
 REDIS_IMAGE=${REDIS_IMAGE:-redis:8}
 REDIS_PORT=${REDIS_PORT:-}
 START_CONTAINERS=${START_CONTAINERS:-true}
@@ -68,8 +68,9 @@ check() { # $1: log, $2: case, $3: try, $4: rc
 }
 
 echo "==> the same SIGINT delivered twice, back to back, still ends with the final summary"
-# The old handler lost the summary in about 9 of 10 such runs, so a few tries
-# catch a regression all but certainly.
+# The old handler lost the summary in about 1 of 5 such runs (and in about 2
+# of 5 runs stopped by timeout -s INT, below), measured on a laptop: 10 tries
+# per case together miss a regression in well under 1% of runs.
 for try in $(seq 1 "$TRIES"); do
   "$WORK/go-ycsb" run redis "${common[@]}" -p operationcount=1000000000 -p threadcount=8 >"$WORK/dup.log" 2>&1 &
   pid=$!
