@@ -83,12 +83,20 @@ fi
 
 python3 - "$WORK/intervals.jsonl" "$WORK/run.log" <<'EOF'
 import json, re, statistics, sys
+from datetime import datetime, timezone
 
 path, log = sys.argv[1], sys.argv[2]
 recs = [json.loads(line) for line in open(path)]
 text = open(log, errors="replace").read()
 # the final summary: operation -> (Takes(s), Count)
 final = {m.group(1): (float(m.group(2)), int(m.group(3))) for m in re.finditer(r"^(\w+)\s+- Takes\(s\): ([\d.]+), Count: (\d+)", text[text.find("Run finished"):], re.M)}
+
+def ts_seconds(ts):
+    # RFC 3339 with up to nanoseconds (Go trims trailing zeros); datetime takes 6 digits at most
+    whole, _, frac = ts.rstrip("Z").partition(".")
+    sec = datetime.strptime(whole, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    return sec + (float("0." + frac) if frac else 0.0)
+
 by = {}
 for r in recs:
     by.setdefault(r["op"], []).append(r)
@@ -99,6 +107,17 @@ if not {"READ", "UPDATE", "TOTAL"} <= set(by) or any(op not in {"READ", "UPDATE"
 if "Run finished" not in text:
     fail.append("no final summary: the run didn't end cleanly on SIGINT")
 for op, rs in by.items():
+    for r in rs:
+        if r["window_s"] > 0 and abs(r["ops"] - r["count"] / r["window_s"]) > 1e-6 * max(1.0, r["ops"]):
+            fail.append(f"{op}: ops {r['ops']} isn't count/window_s in {r}")
+        if r["count"] > 0 and not r["min_us"] <= r["p50_us"] <= r["p99_us"] <= r["max_us"]:
+            fail.append(f"{op}: percentiles out of order in {r}")
+    if any(b["t"] <= a["t"] for a, b in zip(rs, rs[1:])):
+        fail.append(f"{op}: t isn't increasing")
+    # ts is the wall clock at each cut: it advances with t
+    tss = [ts_seconds(r["ts"]) for r in rs]
+    if any(abs((tss[i] - tss[0]) - (rs[i]["t"] - rs[0]["t"])) > 0.05 for i in range(len(rs))):
+        fail.append(f"{op}: ts {[r['ts'] for r in rs]} doesn't advance with t {[r['t'] for r in rs]}")
     if op.endswith("_ERROR"):
         continue
     # Checked against what the run recorded, not against RUN_SECONDS: a slow
@@ -107,24 +126,24 @@ for op, rs in by.items():
     total = sum(r["count"] for r in rs)
     if total != rs[-1]["cum_count"] or total != count:
         fail.append(f"{op}: intervals sum to {total}, last cum_count {rs[-1]['cum_count']}, final summary {count}")
-    if any(b["t"] <= a["t"] for a, b in zip(rs, rs[1:])):
-        fail.append(f"{op}: t isn't increasing")
-    # the windows tile the run: back to back from the start, no gap, no overlap
+    # the windows tile the operation's part of the run: back to back from its
+    # first record (an operation first seen after the first tick starts late),
+    # no gap, no overlap
+    first = rs[0]["t"] - rs[0]["window_s"]
     span = sum(r["window_s"] for r in rs)
-    if abs(span - rs[-1]["t"]) > 1e-3:
-        fail.append(f"{op}: windows sum to {span:.3f}s, but the last ends at t={rs[-1]['t']:.3f}s")
+    if abs(span - (rs[-1]["t"] - first)) > 1e-3:
+        fail.append(f"{op}: windows sum to {span:.3f}s, but they run from t={first:.3f}s to t={rs[-1]['t']:.3f}s")
     # ... and cover the run's own measured duration (the final summary's
     # Takes(s), timed from the operation's first sample) to within one window
     if takes is None or abs(span - takes) > 1.0:
         fail.append(f"{op}: windows sum to {span:.3f}s, the final summary says Takes(s) {takes}")
-    # 1s windows; a late tick on a busy runner stretches one, so bound each loosely
-    # and the typical one tightly
+    # 1s windows. A stall on a busy runner stretches one window and shortens the
+    # next (the ticker keeps its schedule), or drops a tick: allow one such pair.
+    # The last window runs until the final drain, so it has no upper bound.
     ws = [r["window_s"] for r in rs]
-    if not all(0.5 <= w <= 1.5 for w in ws[:-1]) or not 0 < ws[-1] <= 1.5 or (len(ws) > 1 and not 0.95 <= statistics.median(ws[:-1]) <= 1.05):
+    odd = [w for w in ws[:-1] if not 0.5 <= w <= 1.5]
+    if len(odd) > 2 or any(not 0 < w < 3 for w in odd) or not ws[-1] > 0 or (len(ws) > 2 and not 0.95 <= statistics.median(ws[:-1]) <= 1.05):
         fail.append(f"{op}: windows {[round(w, 3) for w in ws]}")
-    for r in rs:
-        if r["count"] > 0 and not r["min_us"] <= r["p50_us"] <= r["p99_us"] <= r["max_us"]:
-            fail.append(f"{op}: percentiles out of order in {r}")
 # TOTAL counts the successful operations: per interval it matches their sum up to
 # the operation/TOTAL pairs a cut splits (at most one per client thread, 16),
 # and exactly over the run.
@@ -136,6 +155,8 @@ for r in recs:
         w["total"] += r["count"]
     elif not r["op"].endswith("_ERROR"):
         w["ops"] += r["count"]
+if len(windows) != len(by.get("TOTAL", [])):
+    fail.append(f"{len(windows)} distinct ts, but {len(by.get('TOTAL', []))} TOTAL records: one ts per interval")
 for ts, w in windows.items():
     if abs(w["ops"] - w["total"]) > threads:
         fail.append(f"interval {ts}: TOTAL {w['total']}, operations {w['ops']}")
