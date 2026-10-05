@@ -15,7 +15,9 @@ package measurement
 
 import (
 	"bufio"
+	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -103,6 +105,9 @@ func InitMeasure(p *properties.Properties) {
 	}
 	globalMeasure.interval = interval
 	intervalFile := p.GetString(prop.MeasurementIntervalOutputFile, "")
+	if err := checkIntervalFile(intervalFile, p); err != nil {
+		util.Fatalf("%v", err)
+	}
 	switch measurementType {
 	case "histogram":
 		h := InitHistograms(p)
@@ -197,3 +202,14 @@ func Measure(op string, start time.Time, lan time.Duration) {
 
 var globalMeasure *measurement
 var warmUp int32 // use as bool, 1 means in warmup progress, 0 means warmup finished.
+
+// checkIntervalFile refuses an interval output file that is also the run's
+// output file: both are created with os.Create, so one would overwrite the
+// other.
+func checkIntervalFile(intervalFile string, p *properties.Properties) error {
+	out := p.GetString(prop.MeasurementRawOutputFile, "")
+	if intervalFile != "" && out != "" && filepath.Clean(intervalFile) == filepath.Clean(out) {
+		return fmt.Errorf("%s and %s are the same file (%s)", prop.MeasurementIntervalOutputFile, prop.MeasurementRawOutputFile, out)
+	}
+	return nil
+}

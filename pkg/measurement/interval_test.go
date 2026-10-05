@@ -500,3 +500,26 @@ func TestIntervalNewOpNeverTrailsTotal(t *testing.T) {
 		}
 	}
 }
+
+// The interval file can't be the run's output file: one os.Create would
+// overwrite the other.
+func TestCheckIntervalFile(t *testing.T) {
+	for _, c := range []struct {
+		interval, out string
+		bad           bool
+	}{
+		{"", "", false},
+		{"iv.jsonl", "", false},
+		{"iv.jsonl", "out.txt", false},
+		{"out.txt", "out.txt", true},
+		{"./dir/../out.txt", "out.txt", true},
+	} {
+		p := properties.NewProperties()
+		if c.out != "" {
+			p.Set(prop.MeasurementRawOutputFile, c.out)
+		}
+		if err := checkIntervalFile(c.interval, p); (err != nil) != c.bad {
+			t.Errorf("interval %q, output %q: err = %v, want error %v", c.interval, c.out, err, c.bad)
+		}
+	}
+}
