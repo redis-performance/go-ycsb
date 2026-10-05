@@ -111,21 +111,24 @@ func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
 	ts := now.UTC().Format(time.RFC3339Nano)
 	h.iv.last = now
 
+	// No recording while the windows are taken, so they end together. The
+	// operation list is read under the same lock: an operation first recorded
+	// between reading the list and the cut would otherwise be counted in TOTAL's
+	// window but have no record of its own. cut before mu, as in Measure.
+	h.cut.Lock()
 	h.mu.RLock()
 	ops := make([]string, 0, len(h.histograms))
 	for op := range h.histograms {
 		ops = append(ops, op)
 	}
-	hs := make([]*histogram, len(ops))
 	sort.Strings(ops)
+	hs := make([]*histogram, len(ops))
 	for i, op := range ops {
 		hs[i] = h.histograms[op]
 	}
 	h.mu.RUnlock()
-
 	ws := make([]*hdrhistogram.Histogram, len(ops))
 	cums := make([]int64, len(ops))
-	h.cut.Lock() // no recording while the windows are taken: they end together
 	for i := range ops {
 		ws[i], cums[i] = hs[i].takeWindow()
 	}
