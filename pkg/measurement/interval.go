@@ -140,17 +140,10 @@ func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
 	h.mu.RUnlock()
 	h.cut.Unlock()
 	sort.Slice(taken, func(i, j int) bool { return taken[i].op < taken[j].op })
-	ops := make([]string, len(taken))
-	hs := make([]*histogram, len(taken))
-	ws := make([]*hdrhistogram.Histogram, len(taken))
-	cums := make([]int64, len(taken))
-	for i, t := range taken {
-		ops[i], hs[i], ws[i], cums[i] = t.op, t.hist, t.w, t.cum
-	}
-	recs := make([]IntervalRecord, 0, len(ops))
-	for i, op := range ops {
-		w, cum := ws[i], cums[i]
-		r := IntervalRecord{TS: ts, T: t, WindowS: window, Op: op, Count: w.TotalCount(), CumCount: cum}
+	recs := make([]IntervalRecord, 0, len(taken))
+	for _, ow := range taken {
+		w := ow.w
+		r := IntervalRecord{TS: ts, T: t, WindowS: window, Op: ow.op, Count: w.TotalCount(), CumCount: ow.cum}
 		if window > 0 {
 			r.Ops = float64(r.Count) / window
 		}
@@ -160,7 +153,7 @@ func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
 			r.AvgUs, r.MinUs, r.MaxUs = &avg, &min, &max
 			r.P50Us, r.P90Us, r.P95Us, r.P99Us, r.P999Us, r.P9999Us = p(50), p(90), p(95), p(99), p(99.9), p(99.99)
 		}
-		hs[i].returnWindow(w)
+		ow.hist.returnWindow(w)
 		recs = append(recs, r)
 	}
 	return recs

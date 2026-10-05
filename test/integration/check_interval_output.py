@@ -2,7 +2,7 @@
 """Check a go-ycsb measurement.interval_output_file against the run's log.
 
 Used by interval_output.sh; kept separate so it can be linted and run on its
-own:
+own. Needs Python 3.10+ (itertools.pairwise):
 
     check_interval_output.py INTERVALS_JSONL RUN_LOG THREADCOUNT LAUNCH_WALL INTERVAL_S
 

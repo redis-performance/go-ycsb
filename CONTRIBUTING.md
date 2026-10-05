@@ -81,7 +81,7 @@ make test-integration-cosmosdb
 make test-integration-cosmosdb-tls
 
 # Per-interval output (pkg/measurement, measurement.interval_output_file)
-# against dockerized Redis
+# against dockerized Redis (the checker needs Python 3.10+)
 make test-integration-interval-output
 ```
 
