@@ -1,3 +1,14 @@
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package measurement
 
 import (
@@ -111,28 +122,31 @@ func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
 	ts := now.UTC().Format(time.RFC3339Nano)
 	h.iv.last = now
 
-	// No recording while the windows are taken, so they end together. The
-	// operation list is read under the same lock: an operation first recorded
-	// between reading the list and the cut would otherwise be counted in TOTAL's
-	// window but have no record of its own. cut before mu, as in Measure.
-	h.cut.Lock()
-	h.mu.RLock()
-	ops := make([]string, 0, len(h.histograms))
-	for op := range h.histograms {
-		ops = append(ops, op)
+	// The operation list is read under the cut lock too, so an operation first
+	// recorded just before the cut is in it (cut before mu, as in Measure).
+	type opWindow struct {
+		op   string
+		hist *histogram
+		w    *hdrhistogram.Histogram
+		cum  int64
 	}
-	sort.Strings(ops)
-	hs := make([]*histogram, len(ops))
-	for i, op := range ops {
-		hs[i] = h.histograms[op]
+	h.cut.Lock() // no recording while the windows are taken: they end together
+	h.mu.RLock()
+	taken := make([]opWindow, 0, len(h.histograms))
+	for op, hist := range h.histograms {
+		w, cum := hist.takeWindow()
+		taken = append(taken, opWindow{op, hist, w, cum})
 	}
 	h.mu.RUnlock()
-	ws := make([]*hdrhistogram.Histogram, len(ops))
-	cums := make([]int64, len(ops))
-	for i := range ops {
-		ws[i], cums[i] = hs[i].takeWindow()
-	}
 	h.cut.Unlock()
+	sort.Slice(taken, func(i, j int) bool { return taken[i].op < taken[j].op })
+	ops := make([]string, len(taken))
+	hs := make([]*histogram, len(taken))
+	ws := make([]*hdrhistogram.Histogram, len(taken))
+	cums := make([]int64, len(taken))
+	for i, t := range taken {
+		ops[i], hs[i], ws[i], cums[i] = t.op, t.hist, t.w, t.cum
+	}
 	recs := make([]IntervalRecord, 0, len(ops))
 	for i, op := range ops {
 		w, cum := ws[i], cums[i]

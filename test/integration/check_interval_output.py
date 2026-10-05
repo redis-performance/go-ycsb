@@ -34,7 +34,9 @@ def ts_seconds(ts):
 
 
 def is_success(op):
-    return op != "TOTAL" and not op.endswith("_ERROR")
+    # READ_MODIFY_WRITE is recorded on its own, without a TOTAL sample; its
+    # inner READ and UPDATE are the ones that record TOTAL.
+    return op not in ("TOTAL", "READ_MODIFY_WRITE") and not op.endswith("_ERROR")
 
 
 def check(recs, text, threads, launch, interval):
