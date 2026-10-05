@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -450,5 +451,52 @@ func TestIntervalWriteErrorReportedOnce(t *testing.T) {
 	}
 	if !errors.Is(closeErr, errWriteFailed) {
 		t.Errorf("IntervalClose = %v, want the write error, so the run fails", closeErr)
+	}
+}
+
+// A new operation's first sample, then its TOTAL, recorded during cuts: at
+// every cut the operations' cum_count sum never trails TOTAL's.
+func TestIntervalNewOpNeverTrailsTotal(t *testing.T) {
+	rounds := 30 // catches the pre-fix race in about half the runs without -race
+	if raceEnabled {
+		rounds = 3 // under -race it rarely triggers; CI also runs it without -race
+	}
+	for round := 0; round < rounds; round++ {
+		h := InitHistograms(properties.NewProperties())
+		h.windows = true
+		h.IntervalStart(time.Now())
+		h.Measure("SEED", time.Now(), time.Microsecond) // TOTAL is already listed
+		h.Measure("TOTAL", time.Now(), time.Microsecond)
+		var wg sync.WaitGroup
+		for w := 0; w < 4; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				for i := 0; i < 50; i++ { // every sample a new operation
+					h.Measure(fmt.Sprintf("OP_%d_%d", w, i), time.Now(), time.Microsecond)
+					h.Measure("TOTAL", time.Now(), time.Microsecond)
+				}
+			}(w)
+		}
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		for running := true; running; {
+			select {
+			case <-done:
+				running = false
+			default:
+			}
+			var ops, total int64
+			for _, r := range h.cutInterval(time.Now()) {
+				if r.Op == "TOTAL" {
+					total = r.CumCount
+				} else {
+					ops += r.CumCount
+				}
+			}
+			if ops < total {
+				t.Fatalf("round %d: operations' cum_count %d trails TOTAL's %d", round, ops, total)
+			}
+		}
 	}
 }

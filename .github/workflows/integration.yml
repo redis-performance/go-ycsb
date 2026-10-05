@@ -67,7 +67,10 @@ jobs:
       # go.yml doesn't run go test, so the interval measurement unit tests
       # (window/cumulative agreement under concurrent recorders) run here.
       - name: Interval measurement unit tests
-        run: go test -race ./pkg/measurement/
+        run: |
+          go test -race ./pkg/measurement/
+          # the race detector hides the cut/new-operation race this test hunts
+          go test -count=5 -run TestIntervalNewOpNeverTrailsTotal ./pkg/measurement/
 
       # Starts (and tears down) its own disposable Redis container, the same
       # command as `make test-integration-interval-output` locally.
