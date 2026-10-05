@@ -30,6 +30,9 @@ func ParseInterval(p *properties.Properties) (time.Duration, error) {
 	}
 	var d time.Duration
 	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n <= 0 {
+			return 0, fmt.Errorf("%s=%q: the minimum is %s", prop.LogInterval, v, MinInterval)
+		}
 		if n > int64(math.MaxInt64/time.Second) {
 			return 0, fmt.Errorf("%s=%q: too large", prop.LogInterval, v)
 		}

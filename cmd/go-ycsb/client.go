@@ -15,13 +15,13 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/pingcap/go-ycsb/pkg/client"
 	"github.com/pingcap/go-ycsb/pkg/measurement"
 	"github.com/pingcap/go-ycsb/pkg/prop"
-	"github.com/pingcap/go-ycsb/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -63,8 +63,10 @@ func runClientCommandFunc(cmd *cobra.Command, args []string, doTransactions bool
 	fmt.Printf("Run finished, takes %s\n", time.Now().Sub(start))
 	if err := measurement.Output(); err != nil {
 		// after the summary: the run's numbers are still printed, but a
-		// truncated interval file must not pass as a complete one
-		util.Fatalf("%v", err)
+		// truncated interval file must not pass as a complete one. main
+		// exits non-zero after its normal teardown (DB and workload close).
+		fmt.Fprintln(os.Stderr, err)
+		globalExitCode = 1
 	}
 }
 

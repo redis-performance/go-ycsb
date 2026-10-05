@@ -39,6 +39,9 @@ func TestParseInterval(t *testing.T) {
 		{in: "9223372036", set: true, want: 9223372036 * time.Second},
 		{in: "9223372037", set: true, bad: true},
 		{in: "18446744074", set: true, bad: true},
+		// negative seconds that would wrap to a huge positive interval
+		{in: "-9223372037", set: true, bad: true},
+		{in: "-18446744074", set: true, bad: true},
 	} {
 		p := properties.NewProperties()
 		if c.set {
