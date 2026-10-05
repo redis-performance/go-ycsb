@@ -15,15 +15,25 @@ package measurement
 
 import (
 	"bufio"
+	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/magiconair/properties"
 	"github.com/pingcap/go-ycsb/pkg/prop"
+	"github.com/pingcap/go-ycsb/pkg/util"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
 )
+
+// intervalMeasurer is a Measurer that also reports per interval (histogram).
+type intervalMeasurer interface {
+	IntervalStart(now time.Time)
+	IntervalTick(now time.Time)
+	IntervalClose(now time.Time) error
+}
 
 var header = []string{"Operation", "Takes(s)", "Count", "OPS", "Avg(us)", "Min(us)", "Max(us)", "50th(us)", "90th(us)", "95th(us)", "99th(us)", "99.9th(us)", "99.99th(us)"}
 
@@ -39,6 +49,7 @@ type measurement struct {
 	p *properties.Properties
 
 	measurer ycsb.Measurer
+	interval time.Duration
 }
 
 var measureChan chan measureEvent
@@ -88,10 +99,28 @@ func InitMeasure(p *properties.Properties) {
 	globalMeasure = new(measurement)
 	globalMeasure.p = p
 	measurementType := p.GetString(prop.MeasurementType, prop.MeasurementTypeDefault)
+	interval, err := ParseInterval(p)
+	if err != nil {
+		util.Fatalf("%v", err)
+	}
+	globalMeasure.interval = interval
+	intervalFile := p.GetString(prop.MeasurementIntervalOutputFile, "")
+	if err := checkIntervalFile(intervalFile, p); err != nil {
+		util.Fatalf("%v", err)
+	}
 	switch measurementType {
 	case "histogram":
-		globalMeasure.measurer = InitHistograms(p)
+		h := InitHistograms(p)
+		if intervalFile != "" {
+			if err := h.openIntervals(intervalFile); err != nil {
+				util.Fatalf("%v", err)
+			}
+		}
+		globalMeasure.measurer = h
 	case "raw", "csv":
+		if intervalFile != "" {
+			util.Fatalf("%s needs %s=histogram", prop.MeasurementIntervalOutputFile, prop.MeasurementType)
+		}
 		globalMeasure.measurer = InitCSV()
 	default:
 		panic("unsupported measurement type: " + measurementType)
@@ -108,14 +137,40 @@ func InitMeasure(p *properties.Properties) {
 	}()
 }
 
-// Output prints the complete measurements.
-func Output() {
+// ReportInterval is the reporting interval (prop.LogInterval).
+func ReportInterval() time.Duration {
+	return globalMeasure.interval
+}
+
+// StartIntervals starts the reporting intervals; call it when warm-up ends.
+func StartIntervals() {
+	if im, ok := globalMeasure.measurer.(intervalMeasurer); ok {
+		im.IntervalStart(time.Now())
+	}
+}
+
+// IntervalTick ends a reporting interval (after the status lines).
+func IntervalTick() {
+	if im, ok := globalMeasure.measurer.(intervalMeasurer); ok {
+		im.IntervalTick(time.Now())
+	}
+}
+
+// Output prints the complete measurements. The error is the interval output
+// file's: the summary is printed regardless, and the caller decides how to fail.
+func Output() error {
 	measureOnce.Do(func() {
 		close(measureChan)
 		measureWg.Wait()
 	})
+	// every sample is recorded now: the last, partial interval is complete
+	var err error
+	if im, ok := globalMeasure.measurer.(intervalMeasurer); ok {
+		err = im.IntervalClose(time.Now())
+	}
 	globalMeasure.measurer.GenerateExtendedOutputs()
 	globalMeasure.output()
+	return err
 }
 
 // Summary prints the measurement summary.
@@ -147,3 +202,14 @@ func Measure(op string, start time.Time, lan time.Duration) {
 
 var globalMeasure *measurement
 var warmUp int32 // use as bool, 1 means in warmup progress, 0 means warmup finished.
+
+// checkIntervalFile refuses an interval output file that is also the run's
+// output file: both are created with os.Create, so one would overwrite the
+// other.
+func checkIntervalFile(intervalFile string, p *properties.Properties) error {
+	out := p.GetString(prop.MeasurementRawOutputFile, "")
+	if intervalFile != "" && out != "" && filepath.Clean(intervalFile) == filepath.Clean(out) {
+		return fmt.Errorf("%s and %s are the same file (%s)", prop.MeasurementIntervalOutputFile, prop.MeasurementRawOutputFile, out)
+	}
+	return nil
+}

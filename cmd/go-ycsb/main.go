@@ -93,6 +93,8 @@ var (
 
 	globalDB       ycsb.DB
 	globalWorkload ycsb.Workload
+	// globalExitCode is the status main exits with after its teardown.
+	globalExitCode int
 	globalProps    *properties.Properties
 )
 
@@ -226,4 +228,7 @@ func main() {
 	}
 
 	closeDone <- struct{}{}
+	if globalExitCode != 0 {
+		os.Exit(globalExitCode)
+	}
 }

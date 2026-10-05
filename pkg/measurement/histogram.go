@@ -14,15 +14,25 @@
 package measurement
 
 import (
+	"sync"
 	"time"
 
 	hdrhistogram "github.com/HdrHistogram/hdrhistogram-go"
 	"github.com/pingcap/go-ycsb/pkg/util"
 )
 
+// histogram keeps the cumulative latencies of one operation and, alongside,
+// the latencies of the current reporting interval (window). mu guards both:
+// Measure runs on the measurement goroutine while the reporter reads them.
 type histogram struct {
 	startTime time.Time
-	hist      *hdrhistogram.Histogram
+
+	mu   sync.Mutex
+	hist *hdrhistogram.Histogram
+	// win collects the current interval; spare is the other buffer, swapped in
+	// at each interval so recording never waits for the reporter's reads.
+	win   *hdrhistogram.Histogram
+	spare *hdrhistogram.Histogram
 }
 
 // Metric name.
@@ -41,15 +51,52 @@ const (
 	PER9999TH = "PER9999TH"
 )
 
-func newHistogram() *histogram {
+func newHDR() *hdrhistogram.Histogram {
+	return hdrhistogram.New(1, 24*60*60*1000*1000, 3)
+}
+
+// newHistogram makes an operation's histogram; with windows it also keeps the
+// per-interval latencies.
+func newHistogram(windows bool) *histogram {
 	h := new(histogram)
 	h.startTime = time.Now()
-	h.hist = hdrhistogram.New(1, 24*60*60*1000*1000, 3)
+	h.hist = newHDR()
+	if windows {
+		h.win = newHDR()
+		h.spare = newHDR()
+	}
 	return h
 }
 
 func (h *histogram) Measure(latency time.Duration) {
-	h.hist.RecordValue(latency.Microseconds())
+	us := latency.Microseconds()
+	h.mu.Lock()
+	h.hist.RecordValue(us)
+	if h.win != nil {
+		h.win.RecordValue(us)
+	}
+	h.mu.Unlock()
+}
+
+// takeWindow returns the interval's latencies and the cumulative count at the
+// same instant, and starts a new interval. The returned histogram is owned by
+// the caller until it passes it back to returnWindow (one reporter at a time).
+func (h *histogram) takeWindow() (*hdrhistogram.Histogram, int64) {
+	h.mu.Lock()
+	w := h.win
+	h.win = h.spare
+	h.spare = nil
+	cum := h.hist.TotalCount()
+	h.mu.Unlock()
+	return w, cum
+}
+
+// returnWindow makes a read window the spare buffer again.
+func (h *histogram) returnWindow(w *hdrhistogram.Histogram) {
+	w.Reset()
+	h.mu.Lock()
+	h.spare = w
+	h.mu.Unlock()
 }
 
 func (h *histogram) Summary() []string {
@@ -72,6 +119,7 @@ func (h *histogram) Summary() []string {
 }
 
 func (h *histogram) getInfo() map[string]interface{} {
+	h.mu.Lock()
 	min := h.hist.Min()
 	max := h.hist.Max()
 	avg := int64(h.hist.Mean())
@@ -83,6 +131,7 @@ func (h *histogram) getInfo() map[string]interface{} {
 	per99 := h.hist.ValueAtPercentile(99)
 	per999 := h.hist.ValueAtPercentile(99.9)
 	per9999 := h.hist.ValueAtPercentile(99.99)
+	h.mu.Unlock()
 
 	elapsed := time.Now().Sub(h.startTime).Seconds()
 	qps := float64(count) / elapsed

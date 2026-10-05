@@ -51,6 +51,32 @@ jobs:
       - name: Stop-signal handling vs. dockerized Redis
         run: make test-integration-stop-signal
 
+  interval-output:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      # go.yml doesn't run go test, so the interval measurement unit tests
+      # (window/cumulative agreement under concurrent recorders) run here.
+      - name: Interval measurement unit tests
+        run: |
+          go test -race ./pkg/measurement/
+          # the race detector hides the cut/new-operation race this test hunts
+          go test -count=5 -run TestIntervalNewOpNeverTrailsTotal ./pkg/measurement/
+
+      # Starts (and tears down) its own disposable Redis container, the same
+      # command as `make test-integration-interval-output` locally.
+      - name: Interval output vs. dockerized Redis
+        run: make test-integration-interval-output
+
   cassandra-tls:
     runs-on: ubuntu-latest
     steps:

@@ -15,6 +15,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -60,7 +61,13 @@ func runClientCommandFunc(cmd *cobra.Command, args []string, doTransactions bool
 	c.Run(globalContext)
 	fmt.Println("**********************************************")
 	fmt.Printf("Run finished, takes %s\n", time.Now().Sub(start))
-	measurement.Output()
+	if err := measurement.Output(); err != nil {
+		// after the summary: the run's numbers are still printed, but a
+		// truncated interval file must not pass as a complete one. main
+		// exits non-zero after its normal teardown (DB and workload close).
+		fmt.Fprintln(os.Stderr, err)
+		globalExitCode = 1
+	}
 }
 
 func runLoadCommandFunc(cmd *cobra.Command, args []string) {
@@ -83,7 +90,7 @@ func initClientCommand(m *cobra.Command) {
 	m.Flags().StringVar(&tableName, "table", "", "Use the table name instead of the default \""+prop.TableNameDefault+"\"")
 	m.Flags().IntVar(&threadsArg, "threads", 1, "Execute using n threads - can also be specified as the \"threadcount\" property")
 	m.Flags().IntVar(&targetArg, "target", 0, "Attempt to do n operations per second (default: unlimited) - can also be specified as the \"target\" property")
-	m.Flags().IntVar(&reportInterval, "interval", 10, "Interval of outputting measurements in seconds")
+	m.Flags().IntVar(&reportInterval, "interval", 10, "Interval of outputting measurements in whole seconds; overrides -p measurement.interval (for sub-second intervals use -p measurement.interval=500ms instead)")
 }
 
 func newLoadCommand() *cobra.Command {

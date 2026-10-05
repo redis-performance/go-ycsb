@@ -156,6 +156,22 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
 |-|-|-|
 |measurementtype|"histogram"|The mechanism for recording measurements, one of `histogram`, `raw` or `csv`|
 |measurement.output_file|""|File to write output to, default writes to stdout|
+|measurement.interval|10s|How often the status lines (and interval records) are written: a Go duration such as `1s` or `500ms`, or a number of seconds; at least `100ms`. `--interval <seconds>` sets it too, in whole seconds only, and wins over `-p measurement.interval` when both are given: for a sub-second interval use `-p measurement.interval` alone|
+|measurement.interval_output_file|""|With `measurementtype=histogram`: a file that gets one JSON line per operation per interval, with that interval's own latency percentiles (the status lines' percentiles are cumulative since the start)|
+
+Each line of `measurement.interval_output_file` describes one operation over one interval, e.g.:
+
+```json
+{"ts":"2026-10-03T21:12:36.55Z","t":1.0004,"window_s":1.0004,"op":"READ","count":32711,"ops":32698.0,"avg_us":487.5,"min_us":94,"max_us":2835,"p50_us":470,"p90_us":644,"p95_us":710,"p99_us":903,"p999_us":1412,"p9999_us":2193,"cum_count":32711}
+```
+
+- `ts` is the end of the interval (UTC), `t` the seconds since the measurement started (after warm-up), `window_s` the interval's length; `count` and the latencies (µs) cover that interval only, `ops` is `count / window_s`, and `cum_count` is the running total.
+- Every operation seen so far gets a line each interval. An interval in which it had no samples has `count: 0` and no latency fields.
+- Failed operations appear under their own names (`READ_ERROR`, ...). The last, partial interval is written when the run ends, also when it's stopped with SIGINT.
+- A sample belongs to the interval in which the single measurement goroutine records it, not the one in which the operation ended. That is within microseconds while the goroutine keeps up. If it falls behind (client threads produce samples faster than it records them, which shows as the measure channel filling up), its backlog is recorded late: interval rates and percentiles shift towards later intervals, and at the end of the run the backlog drains into the last interval, whose rate can then exceed anything the database served. Treat a last interval with an implausible `ops` as a saturated client, not as a database result.
+- All operations' intervals end at the same instant. `TOTAL` counts the successful operations, so in each interval it matches their sum up to the operation/`TOTAL` pairs a cut falls between (at most one per client thread), and exactly over the run. Two exceptions: `READ_MODIFY_WRITE` records no `TOTAL` sample of its own (its inner `READ` and `UPDATE` do), and with `warmuptime` set a thread can record `TOTAL` for an operation the warm-up dropped.
+- The file is created (truncated) at start by both `load` and `run`, so with the property in a shared workload file `run` replaces what `load` wrote; give each command its own path (`-p measurement.interval_output_file=...`) to keep both.
+- Without `measurement.interval_output_file` no per-interval histograms are kept. Recording a sample now takes a lock (the fix for a data race between recording and reporting), about 11 ns more per sample, uncontended: one goroutine records, the reporter takes it once per interval.
 
 ## Database Configuration
 
