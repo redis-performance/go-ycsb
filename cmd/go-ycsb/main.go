@@ -147,6 +147,45 @@ func initialGlobal(dbName string, onProperties func()) {
 	globalDB = client.DbWrapper{globalDB}
 }
 
+// duplicateSignalWindow: the same stop signal again within this of the first is
+// the same stop delivered twice, not a request to exit at once.
+const duplicateSignalWindow = time.Second
+
+// waitStop handles the stop signals: the first cancels the run, a second one
+// (unless it is the first delivered twice, within duplicateSignalWindow) or
+// forceAfter without the run closing exits at once. It returns when the run
+// closed (closeDone).
+func waitStop(sc <-chan os.Signal, closeDone <-chan struct{}, forceAfter time.Duration, now func() time.Time,
+	after func(time.Duration) <-chan time.Time, exit func(int)) {
+	sig := <-sc
+	first := now()
+	fmt.Printf("\nGot signal [%v] to exit.\n", sig)
+	globalCancel()
+
+	forceExit := after(forceAfter)
+	for {
+		select {
+		case again := <-sc:
+			// timeout(1) signals both the command and its process group, so
+			// one stop can arrive twice: only a later signal, or a different
+			// one, means "now".
+			if within := now().Sub(first) < duplicateSignalWindow; within && again == sig {
+				continue
+			}
+			// send signal again, return directly
+			fmt.Printf("\nGot signal [%v] again to exit.\n", again)
+			exit(1)
+			return
+		case <-forceExit:
+			fmt.Printf("\nWait %v for closed, force exit\n", forceAfter)
+			exit(1)
+			return
+		case <-closeDone:
+			return
+		}
+	}
+}
+
 func main() {
 	globalContext, globalCancel = context.WithCancel(context.Background())
 
@@ -158,23 +197,7 @@ func main() {
 		syscall.SIGQUIT)
 
 	closeDone := make(chan struct{}, 1)
-	go func() {
-		sig := <-sc
-		fmt.Printf("\nGot signal [%v] to exit.\n", sig)
-		globalCancel()
-
-		select {
-		case <-sc:
-			// send signal again, return directly
-			fmt.Printf("\nGot signal [%v] again to exit.\n", sig)
-			os.Exit(1)
-		case <-time.After(10 * time.Second):
-			fmt.Print("\nWait 10s for closed, force exit\n")
-			os.Exit(1)
-		case <-closeDone:
-			return
-		}
-	}()
+	go waitStop(sc, closeDone, 10*time.Second, time.Now, time.After, os.Exit)
 
 	rootCmd := &cobra.Command{
 		Use:   "go-ycsb",

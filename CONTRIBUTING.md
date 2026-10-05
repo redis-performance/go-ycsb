@@ -60,6 +60,9 @@ If your change touches a database adapter or the core workload, also run the rel
 # Feature-store workload load+run against dockerized Redis + MongoDB
 make test-integration-feature-store
 
+# Stop-signal handling (SIGINT twice, timeout -s INT) against dockerized Redis
+make test-integration-stop-signal
+
 # Cassandra TLS support against a dockerized, TLS-enabled ScyllaDB node
 make test-integration-cassandra-tls
 
@@ -82,7 +85,7 @@ make test-integration-cosmosdb-tls
 - Check the client library is on its latest version (`go list -m -versions <module>` vs. what's pinned in `go.mod`) and upgrade it first if it's stale, before building the new capability on top.
 - Add a Docker-based integration test under `test/integration/`, wired into a `make test-integration-*` target and a job in `.github/workflows/integration.yml`, following the existing pattern. For TLS/auth specifically, assert on both directions (valid credential accepted AND invalid one rejected) — see `AGENTS.md`'s "Database adapter changes" section for why.
 
-Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run `go test ./...` — that remains the contributor's responsibility locally before opening a PR. A separate CI workflow (`.github/workflows/integration.yml`) runs `feature-store`, `cassandra-tls`, `aerospike-tls`, `couchbase`, and `cosmosdb` jobs against dockerized backends on every push/PR to `master`.
+Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run `go test ./...` — that remains the contributor's responsibility locally before opening a PR. A separate CI workflow (`.github/workflows/integration.yml`) runs `feature-store`, `stop-signal`, `cassandra-tls`, `aerospike-tls`, `couchbase`, and `cosmosdb` jobs against dockerized backends on every push/PR to `master`.
 
 ## Review process
 

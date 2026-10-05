@@ -48,6 +48,11 @@ check:
 test-integration-feature-store:
 	./test/integration/feature_store.sh
 
+# Runs go-ycsb against a dockerized Redis and stops it with SIGINT, twice back
+# to back and via timeout -s INT, checking every run ends with its final summary.
+test-integration-stop-signal:
+	./test/integration/stop_signal.sh
+
 # Runs db/cassandra/db.go's TLS support against a dockerized, TLS-enabled
 # ScyllaDB node, asserting both that a connection using the correct CA
 # succeeds AND that one using an unrelated CA is rejected - the second
