@@ -147,8 +147,8 @@ func initialGlobal(dbName string, onProperties func()) {
 	globalDB = client.DbWrapper{globalDB}
 }
 
-// duplicateSignalWindow: a second stop signal within this of the first is the
-// same stop delivered twice, not a request to exit at once.
+// duplicateSignalWindow: the same stop signal again within this of the first is
+// the same stop delivered twice, not a request to exit at once.
 const duplicateSignalWindow = time.Second
 
 // waitStop handles the stop signals: the first cancels the run, a second one
@@ -165,14 +165,15 @@ func waitStop(sc <-chan os.Signal, closeDone <-chan struct{}, forceAfter time.Du
 	forceExit := after(forceAfter)
 	for {
 		select {
-		case <-sc:
+		case again := <-sc:
 			// timeout(1) signals both the command and its process group, so
-			// one stop can arrive twice: only a later signal means "now".
-			if now().Sub(first) < duplicateSignalWindow {
+			// one stop can arrive twice: only a later signal, or a different
+			// one, means "now".
+			if within := now().Sub(first) < duplicateSignalWindow; within && again == sig {
 				continue
 			}
 			// send signal again, return directly
-			fmt.Printf("\nGot signal [%v] again to exit.\n", sig)
+			fmt.Printf("\nGot signal [%v] again to exit.\n", again)
 			exit(1)
 			return
 		case <-forceExit:

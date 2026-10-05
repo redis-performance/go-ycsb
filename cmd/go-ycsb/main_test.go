@@ -54,13 +54,20 @@ func startStop(t *testing.T, forceAfter time.Duration) *stopHarness {
 	return h
 }
 
-// signal delivers one signal at fake time at and waits until waitStop has read
+// signal delivers one SIGINT at fake time at and waits until waitStop has read
 // the clock for it.
 func (h *stopHarness) signal(t *testing.T, at time.Duration) {
 	t.Helper()
+	h.send(t, syscall.SIGINT, at)
+}
+
+// send delivers sig at fake time at and waits until waitStop has read the clock
+// for it.
+func (h *stopHarness) send(t *testing.T, sig os.Signal, at time.Duration) {
+	t.Helper()
 	h.clock.Store(int64(at))
 	select {
-	case h.sc <- syscall.SIGINT:
+	case h.sc <- sig:
 	case <-h.done:
 		t.Fatalf("waitStop returned before the signal at %v", at)
 	case <-time.After(5 * time.Second):
@@ -87,6 +94,7 @@ func TestWaitStop(t *testing.T) {
 	for _, c := range []struct {
 		name     string
 		gaps     []time.Duration // after the first signal, when each later one arrives
+		second   os.Signal       // the later signals, SIGINT if nil
 		wantExit bool
 	}{
 		{name: "one signal: wait for the run to close", wantExit: false},
@@ -94,12 +102,17 @@ func TestWaitStop(t *testing.T) {
 		{name: "delivered twice, within the window", gaps: []time.Duration{999 * time.Millisecond}, wantExit: false},
 		{name: "a second Ctrl-C after the window", gaps: []time.Duration{1500 * time.Millisecond}, wantExit: true},
 		{name: "duplicate, then a later signal", gaps: []time.Duration{0, 2 * time.Second}, wantExit: true},
+		{name: "a different signal within the window", gaps: []time.Duration{0}, second: syscall.SIGQUIT, wantExit: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := startStop(t, time.Hour)
 			h.signal(t, 0)
+			second := c.second
+			if second == nil {
+				second = syscall.SIGINT
+			}
 			for _, g := range c.gaps {
-				h.signal(t, g)
+				h.send(t, second, g)
 			}
 			if c.wantExit {
 				h.wait(t) // an exit returns without waiting for the run
