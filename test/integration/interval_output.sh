@@ -51,10 +51,15 @@ if [ "$START_CONTAINERS" = "true" ]; then
   docker run -d --rm --name "$REDIS_CONTAINER" -p "127.0.0.1:${REDIS_PORT}:6379" "$REDIS_IMAGE" >/dev/null
   REDIS_PORT=$(docker port "$REDIS_CONTAINER" 6379/tcp | head -n 1 | sed 's/.*://')
   echo "    on 127.0.0.1:$REDIS_PORT"
+  ready=0
   for _ in $(seq 1 30); do
-    docker exec "$REDIS_CONTAINER" redis-cli ping >/dev/null 2>&1 && break
+    docker exec "$REDIS_CONTAINER" redis-cli ping >/dev/null 2>&1 && { ready=1; break; }
     sleep 1
   done
+  if [ "$ready" != 1 ]; then
+    echo "FAIL: Redis did not become ready in 30 s" >&2
+    exit 1
+  fi
 fi
 REDIS_ADDR=${REDIS_ADDR:-127.0.0.1:${REDIS_PORT:-16380}}
 
