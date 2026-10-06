@@ -80,6 +80,15 @@ var stopGrace = 5 * time.Second
 // which ends whatever an operation waits for on its context (a retry's
 // back-off, a pool turn, a dial), and the client is closed, which ends the
 // reads in progress.
+//
+// A deliberate limit: the client is the instance's, shared by every run on
+// it, so the end of one run's grace closes it for all of them. Runs one after
+// the other on one instance are kept apart (a run whose threads are done
+// arms no close: see retire), but runs at the same time are not: at the end
+// of the first one's grace the others' operations fail ("redis: client is
+// closed"), whether they stopped or not. go-ycsb's CLI has one run per
+// process, so this only concerns an embedder running several at once, which
+// needs an instance (a Create) per run.
 type runStop struct {
 	key     <-chan struct{} // the run's contexts' Done channel
 	done    context.Context
@@ -538,6 +547,10 @@ func started(ctx context.Context) (context.Context, error) {
 		}
 		return &opContext{ctx, t.run}, nil
 	}
+	// A context InitThread didn't make: no run, so no grace, and nothing
+	// cancels the operation at a stop (its timeouts and retries still end
+	// it). go-ycsb's workloads always pass InitThread's context, or one
+	// derived from it, so this is for an embedder's direct calls only.
 	return context.WithoutCancel(ctx), nil
 }
 
