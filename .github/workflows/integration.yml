@@ -101,6 +101,29 @@ jobs:
       - name: Interval output vs. dockerized Redis
         run: make test-integration-interval-output
 
+  redis-batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      # go.yml doesn't run go test, so the batched-load unit tests run here.
+      - name: Batched load unit tests
+        run: make test-batch
+
+      # Starts (and tears down) its own disposable single Redis and 6-node
+      # Redis Cluster containers, the same command as
+      # `make test-integration-redis-batch` locally.
+      - name: Batched load vs. dockerized Redis and Redis Cluster
+        run: make test-integration-redis-batch
+
   cassandra-tls:
     runs-on: ubuntu-latest
     steps:

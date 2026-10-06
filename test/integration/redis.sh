@@ -10,8 +10,8 @@
 # replied no errors.
 #
 # Same script for local dev and CI: it starts (and tears down) its own
-# disposable containers, under names unique to the run, and skips without
-# docker.
+# disposable containers, under names unique to the run. Without docker or
+# python3 it skips, or in CI ($CI set) fails.
 #
 # Usage:
 #   test/integration/redis.sh
@@ -34,14 +34,7 @@ cd "$ROOT_DIR"
 # shellcheck source=test/integration/redis_lib.sh
 . test/integration/redis_lib.sh
 
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "SKIP: docker is not available"
-  exit 0
-fi
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "SKIP: python3 is not available (it picks the cluster's free ports)"
-  exit 0
-fi
+redis_require_tools
 
 WORK=$(mktemp -d)
 # unique per run, so concurrent runs (two people, two CI jobs) don't collide

@@ -67,6 +67,9 @@ make test-integration-redis
 # Stop-signal handling (SIGINT twice, timeout -s INT) against dockerized Redis
 make test-integration-stop-signal
 
+# Batched loads (batch.size) against a dockerized single Redis and Redis Cluster
+make test-integration-redis-batch
+
 # Cassandra TLS support against a dockerized, TLS-enabled ScyllaDB node
 make test-integration-cassandra-tls
 
@@ -93,7 +96,7 @@ make test-integration-interval-output
 - Check the client library is on its latest version (`go list -m -versions <module>` vs. what's pinned in `go.mod`) and upgrade it first if it's stale, before building the new capability on top.
 - Add a Docker-based integration test under `test/integration/`, wired into a `make test-integration-*` target and a job in `.github/workflows/integration.yml`, following the existing pattern. For TLS/auth specifically, assert on both directions (valid credential accepted AND invalid one rejected) — see `AGENTS.md`'s "Database adapter changes" section for why.
 
-Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run `go test ./...` — that remains the contributor's responsibility locally before opening a PR. A separate CI workflow (`.github/workflows/integration.yml`) runs `feature-store`, `redis`, `stop-signal`, `interval-output`, `cassandra-tls`, `aerospike-tls`, `couchbase` and `cosmosdb` jobs against dockerized backends on every push/PR to `master`.
+Note: CI (`.github/workflows/go.yml`) cross-compiles the binary for linux/darwin on amd64/arm64 but does not run `go test ./...` — that remains the contributor's responsibility locally before opening a PR. A separate CI workflow (`.github/workflows/integration.yml`) runs `feature-store`, `redis`, `stop-signal`, `interval-output`, `redis-batch`, `cassandra-tls`, `aerospike-tls`, `couchbase` and `cosmosdb` jobs against dockerized backends on every push/PR to `master`.
 
 ## Review process
 

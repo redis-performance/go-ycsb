@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	json "github.com/segmentio/encoding/json"
@@ -44,22 +46,177 @@ type redis struct {
 	mode       string
 	datatype   string
 	fieldcount int64
+
+	mu     sync.Mutex                   // guards runs and closed
+	runs   map[<-chan struct{}]*runStop // the stops of the runs with threads
+	closed bool
 }
 
 func (r *redis) Close() error {
+	r.mu.Lock()
+	for key, s := range r.runs {
+		s.retire()
+		delete(r.runs, key)
+	}
+	if r.closed { // by a stop's grace
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	r.mu.Unlock()
 	return r.client.Close()
 }
 
-func (r *redis) InitThread(ctx context.Context, _ int, _ int) context.Context {
-	return ctx
+// stopGrace is how long after the run's stop the operations already sent may
+// still run to their outcome. At its end everything still in flight is ended
+// at once (see runStop), so the run ends, and prints its summary, well before
+// go-ycsb's force-exit 10 s after the stop, whatever redis.read_timeout,
+// redis.dial_timeout or the retry settings.
+var stopGrace = 5 * time.Second
+
+// runStop is a run's stop, for the operations its threads sent: the threads
+// of a run share their context's cancellation (its Done channel identifies
+// the run). At the run's stop the grace starts; at its end, done is canceled,
+// which ends whatever an operation waits for on its context (a retry's
+// back-off, a pool turn, a dial), and the client is closed, which ends the
+// reads in progress.
+//
+// A deliberate limit: the client is the instance's, shared by every run on
+// it, so the end of one run's grace closes it for all of them. Runs one after
+// the other on one instance are kept apart (a run whose threads are done
+// arms no close: see retire), but runs at the same time are not: at the end
+// of the first one's grace the others' operations fail ("redis: client is
+// closed"), whether they stopped or not. go-ycsb's CLI has one run per
+// process, so this only concerns an embedder running several at once, which
+// needs an instance (a Create) per run.
+type runStop struct {
+	key     <-chan struct{} // the run's contexts' Done channel
+	done    context.Context
+	cancel  context.CancelFunc
+	unhook  func() bool // stops waiting for the run's stop
+	timer   *time.Timer // the grace, once the run stopped
+	threads int         // threads started and not cleaned up
+	retired bool        // no grace to come: its threads are done, or the client closed
 }
 
-func (r *redis) CleanupThread(_ context.Context) {
+// retire disarms the run's stop: its threads are done (or the client is
+// closed), so its end mustn't close anything, during a later run say.
+// Called with r.mu held.
+func (s *runStop) retire() {
+	s.retired = true
+	s.unhook()
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+}
+
+// thread is a thread's context, and the context of its operations once sent:
+// the thread's values, the run's grace for cancellation (opContext, made once
+// here for operations on the thread's own context, so that an operation sent
+// on its own allocates none; a batch, whose context carries one value more,
+// gets an opContext of its own).
+type thread struct {
+	ctx  context.Context
+	sent context.Context
+	run  *runStop
+}
+
+type threadKey struct{}
+
+// opContext is the context of an operation sent: its own context's values,
+// and the end of the run's grace for cancellation.
+type opContext struct {
+	context.Context
+	run *runStop
+}
+
+func (c *opContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *opContext) Done() <-chan struct{}       { return c.run.done.Done() }
+func (c *opContext) Err() error                  { return c.run.done.Err() }
+
+// AfterFunc lets contexts derived from an opContext follow the grace without
+// a goroutine each (context.AfterFunc and context.WithCancel use it).
+func (c *opContext) AfterFunc(f func()) func() bool { return context.AfterFunc(c.run.done, f) }
+
+func (r *redis) InitThread(ctx context.Context, _ int, _ int) context.Context {
+	r.mu.Lock()
+	s := r.runs[ctx.Done()]
+	if s == nil {
+		s = &runStop{key: ctx.Done()}
+		s.done, s.cancel = context.WithCancel(context.Background())
+		grace := stopGrace
+		s.unhook = context.AfterFunc(ctx, func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if !s.retired {
+				s.timer = time.AfterFunc(grace, func() { r.endGrace(s) })
+			}
+		})
+		if r.runs == nil {
+			r.runs = make(map[<-chan struct{}]*runStop)
+		}
+		r.runs[s.key] = s
+	}
+	s.threads++
+	r.mu.Unlock()
+	t := &thread{run: s}
+	t.ctx = context.WithValue(ctx, threadKey{}, t)
+	t.sent = &opContext{t.ctx, s}
+	return t.ctx
+}
+
+func (r *redis) CleanupThread(ctx context.Context) {
+	t, ok := ctx.Value(threadKey{}).(*thread)
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t.run.threads--; t.run.threads == 0 && !t.run.retired {
+		t.run.retire()
+		if r.runs[t.run.key] == t.run {
+			delete(r.runs, t.run.key)
+		}
+	}
+}
+
+// closeToCancel is how long after closing the client at the end of the grace
+// the operations' context is canceled: at the default redirects, long enough
+// for tries already failing on the closed client to finish (each fails at
+// once, after a back-off of some ms) with their records' real outcomes. If
+// the cancel lands during a back-off or a dial (large redis.max_redirects, or
+// a dial in progress, at any setting), go-redis marks every record of that
+// batch failed, the ones the healthy masters wrote too, and INSERT undercounts
+// what was written; with redis.max_redirects=-1 only the records of the
+// master that didn't answer fail. Short enough to end at once what would
+// otherwise wait on: a long back-off, a pool turn, a dial.
+const closeToCancel = 200 * time.Millisecond
+
+// endGrace ends what the run still has in flight: it closes the client (unless
+// the run closed it already), which ends the reads in progress, and then
+// cancels the operations' context, which ends what they wait for on it.
+func (r *redis) endGrace(s *runStop) {
+	r.mu.Lock()
+	if s.retired {
+		r.mu.Unlock()
+		return
+	}
+	// armed before the close, which can block (go-redis waits for its
+	// maintenance notifications handler, when they are on)
+	time.AfterFunc(closeToCancel, s.cancel)
+	closed := r.closed // by another run's grace: this run's waits still end
+	r.closed = true
+	r.mu.Unlock()
+	if !closed {
+		r.client.Close()
+	}
 }
 
 func (r *redis) Read(ctx context.Context, table string, key string, fields []string) (data map[string][]byte, err error) {
+	if ctx, err = started(ctx); err != nil {
+		return nil, err
+	}
 	data = make(map[string][]byte, len(fields))
-	err = nil
 	switch r.datatype {
 	case JSON_DATATYPE:
 		cmds := make([]*goredis.Cmd, len(fields))
@@ -142,6 +299,9 @@ func (r *redis) Scan(ctx context.Context, table string, startKey string, count i
 }
 
 func (r *redis) Update(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
+	if ctx, err = started(ctx); err != nil {
+		return err
+	}
 	// check if it's full update. If yes then we can avoid reading the previous value on string datype
 	fullUpdate := false
 	if int64(len(values)) == r.fieldcount {
@@ -228,31 +388,170 @@ func getKeyName(table string, key string) string {
 	return table + "/" + key
 }
 
-func (r *redis) Insert(ctx context.Context, table string, key string, values map[string][]byte) (err error) {
-	data, err := json.Marshal(values)
-	if err != nil {
-		return err
-	}
+// cmdable is what insert needs of a client or a pipeline.
+type cmdable interface {
+	Do(ctx context.Context, args ...interface{}) *goredis.Cmd
+	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *goredis.StatusCmd
+}
+
+// insert issues the command that inserts one record on c: it runs it on a
+// client and queues it on a pipeline, so Insert and BatchInsert write a
+// record with the very same command.
+func (r *redis) insert(ctx context.Context, c cmdable, table string, key string, values map[string][]byte) (goredis.Cmder, error) {
 	switch r.datatype {
 	case JSON_DATATYPE:
-		err = r.client.Do(ctx, JSON_SET, getKeyName(table, key), ".", string(data)).Err()
+		data, err := json.Marshal(values)
+		if err != nil {
+			return nil, err
+		}
+		return c.Do(ctx, JSON_SET, getKeyName(table, key), ".", string(data)), nil
 	case HASH_DATATYPE:
 		args := make([]interface{}, 0, 2*len(values)+2)
 		args = append(args, HSET, getKeyName(table, key))
 		for fieldName, bytes := range values {
 			args = append(args, fieldName, string(bytes))
 		}
-		err = r.client.Do(ctx, args...).Err()
+		return c.Do(ctx, args...), nil
 	case STRING_DATATYPE:
 		fallthrough
 	default:
-		err = r.client.Set(ctx, getKeyName(table, key), string(data), 0).Err()
+		data, err := json.Marshal(values)
+		if err != nil {
+			return nil, err
+		}
+		return c.Set(ctx, getKeyName(table, key), string(data), 0), nil
 	}
-	return
+}
+
+func (r *redis) Insert(ctx context.Context, table string, key string, values map[string][]byte) error {
+	ctx, err := started(ctx)
+	if err != nil {
+		return err
+	}
+	cmd, err := r.insert(ctx, r.client, table, key, values)
+	if err != nil {
+		return err
+	}
+	return cmd.Err()
+}
+
+// BatchInsert sends the records' insert commands in one pipeline (not a
+// MULTI/EXEC transaction): in cluster mode go-redis splits it by the node
+// owning each key's slot and runs the nodes' pipelines concurrently. Each
+// record succeeds or fails on its own, as with Insert; a *ycsb.BatchError
+// reports which failed.
+func (r *redis) BatchInsert(ctx context.Context, table string, keys []string, values []map[string][]byte) error {
+	errs := make([]error, len(keys))
+	ctx, err := started(ctx)
+	if err != nil {
+		for i := range errs {
+			errs[i] = err
+		}
+		return ycsb.NewBatchError(errs)
+	}
+	cmds := make([]goredis.Cmder, len(keys))
+	pipe := r.client.Pipeline()
+	for i, key := range keys {
+		cmds[i], errs[i] = r.insert(ctx, pipe, table, key, values[i])
+	}
+	if pipe.Len() == 0 {
+		return ycsb.NewBatchError(errs)
+	}
+	// The per-command errors below are the outcome; Exec's error is the first
+	// of them, unless the pipeline failed without setting them.
+	_, execErr := pipe.Exec(ctx)
+	anyCmdErr := false
+	for i, cmd := range cmds {
+		if cmd != nil && cmd.Err() != nil {
+			errs[i] = cmd.Err()
+			anyCmdErr = true
+		}
+	}
+	if execErr != nil && !anyCmdErr {
+		for i, cmd := range cmds {
+			if cmd != nil {
+				errs[i] = execErr
+			}
+		}
+	}
+	return ycsb.NewBatchError(errs)
 }
 
 func (r *redis) Delete(ctx context.Context, table string, key string) error {
+	ctx, err := started(ctx)
+	if err != nil {
+		return err
+	}
 	return r.client.Del(ctx, getKeyName(table, key)).Err()
+}
+
+// pingMaster checks a cluster is up by pinging a master, the master of a
+// random slot as go-redis v9.8.0's Ping did, trying another one up to tries
+// times. go-redis v9.22.0 sends a keyless command such as PING to any node,
+// replicas too, without routing policies (redis.routing_policies=false).
+// A slot map that can't be loaded fails at once: each try would load it
+// again, synchronously, which against a stalled cluster multiplies the time
+// to fail by the tries.
+func pingMaster(ctx context.Context, c *goredis.ClusterClient, tries int) error {
+	var err error
+	for i := 0; i < max(1, tries); i++ {
+		var master *goredis.Client
+		if master, err = c.MasterForKey(ctx, strconv.Itoa(rand.Int())); err != nil {
+			return err
+		}
+		if err = master.Ping(ctx).Err(); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// newClusterClient makes the cluster client, loads the slot map and pings a
+// master (redis.max_redirects + 1 tries, as go-redis retries a command).
+func newClusterClient(ctx context.Context, opts *goredis.ClusterOptions) (*goredis.ClusterClient, error) {
+	c := goredis.NewClusterClient(opts) // opts now has go-redis's defaults applied
+	// ReloadState reloads cluster state. It calls ClusterSlots func
+	// to get cluster slots information.
+	c.ReloadState(ctx)
+	if err := pingMaster(ctx, c, opts.MaxRedirects+1); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// started returns the context an operation runs in, once it starts. If the
+// run has stopped (ctx canceled) the operation isn't sent: its error wraps
+// ycsb.ErrNotRun and the stop's, and counts as nothing (the stop came between
+// the client's check and this one). Once sent, it runs to
+// its own outcome, its timeouts and retries included, on a context the stop
+// doesn't cancel until the end of the grace: go-redis ends a retry's
+// back-off on a canceled context and then sets every command still in the
+// try (in cluster pipelines: every command of the batch, the ones already
+// written too) to the context's error, so a stop that canceled them at once
+// would turn records written, or retried in, into errors. At the end of the
+// grace the operation fails: a try after the close with "redis: client is
+// closed", which is also how a read in progress ends at the default retries
+// (the closed connection's error is retryable, and the next try finds the
+// client closed): it ends with "use of closed network connection" only with
+// redis.max_retries / redis.max_redirects at -1, while a pipeline's commands
+// on that connection keep that error; what waited on the context (a
+// back-off, a pool turn, a dial) fails with context.Canceled.
+func started(ctx context.Context) (context.Context, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ycsb.ErrNotRun, err)
+	}
+	if t, ok := ctx.Value(threadKey{}).(*thread); ok {
+		if ctx == t.ctx {
+			return t.sent, nil
+		}
+		return &opContext{ctx, t.run}, nil
+	}
+	// A context InitThread didn't make: no run, so no grace, and nothing
+	// cancels the operation at a stop (its timeouts and retries still end
+	// it). go-ycsb's workloads always pass InitThread's context, or one
+	// derived from it, so this is for an embedder's direct calls only.
+	return context.WithoutCancel(ctx), nil
 }
 
 type redisCreator struct{}
@@ -267,13 +566,9 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		if err != nil {
 			return nil, err
 		}
-		clusterClient := goredis.NewClusterClient(clusterOpts)
-		// ReloadState reloads cluster state. It calls ClusterSlots func
-		// to get cluster slots information.
-		clusterClient.ReloadState(context.Background())
-		err = clusterClient.Ping(context.Background()).Err()
+		// on an error newClusterClient has closed its client already
+		clusterClient, err := newClusterClient(context.Background(), clusterOpts)
 		if err != nil {
-			clusterClient.Close()
 			return nil, err
 		}
 		if p.GetBool(prop.DropData, prop.DropDataDefault) {
