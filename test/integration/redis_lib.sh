@@ -4,7 +4,8 @@
 # Redis Cluster containers, under names unique to the run. Sourced, not run.
 #
 # Callers set REDIS_IMAGE and SUFFIX (unique per run), call redis_start_single
-# and/or redis_start_cluster, and redis_cleanup on exit.
+# and/or redis_start_cluster, and redis_cleanup on exit. redis_start_cluster
+# needs python3 (free_ports): callers check for it, and skip without it.
 
 REDIS_CONTAINERS=()
 
@@ -28,7 +29,8 @@ wait_for() {
   return 1
 }
 
-# redis_start_single <name>: starts a single Redis; sets SINGLE_PORT.
+# redis_start_single <name>: starts a single Redis; sets SINGLE_PORT, its port
+# on the host (it listens on 6379 in the container).
 redis_start_single() {
   local name=$1
   echo "==> starting $REDIS_IMAGE (single, $name)"
@@ -38,6 +40,7 @@ redis_start_single() {
   wait_for "single redis" docker exec "$name" redis-cli ping
 }
 
+# free_ports <n>: n free TCP ports on 127.0.0.1 (needs python3).
 free_ports() {
   python3 -c 'import socket, sys
 ss = [socket.socket() for _ in range(int(sys.argv[1]))]

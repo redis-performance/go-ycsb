@@ -38,6 +38,10 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "SKIP: docker is not available"
   exit 0
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "SKIP: python3 is not available (it picks the cluster's free ports)"
+  exit 0
+fi
 
 WORK=$(mktemp -d)
 # unique per run, so concurrent runs (two people, two CI jobs) don't collide
@@ -96,6 +100,8 @@ masters_dbsize() {
   echo "$total"
 }
 
+# run_mode <mode> <redis.addr> <container> <ports...>: the ports are the
+# nodes' ports inside the container, which redis_cli talks to.
 run_mode() {
   local mode=$1 addr=$2 container=$3
   shift 3
@@ -142,7 +148,9 @@ run_mode() {
   echo "OK: [$mode] no COMMAND, no CLIENT MAINT_NOTIFICATIONS, no error replies"
 }
 
-run_mode single "127.0.0.1:$SINGLE_PORT" "$SINGLE" "$SINGLE_PORT"
+# the single Redis listens on 6379 in its container, on $SINGLE_PORT on the host
+run_mode single "127.0.0.1:$SINGLE_PORT" "$SINGLE" 6379
+# the cluster nodes listen on the same ports in the container and on the host
 # shellcheck disable=SC2086 # the ports are a list
 run_mode cluster "$CLUSTER_ADDR" "$CLUSTER" $CLUSTER_PORTS
 
