@@ -402,31 +402,55 @@ Notes:
 |redis.datatype|hash|"hash", "string" or "json" ("json" requires [RedisJSON](https://redis.io/docs/stack/json/) available)|
 |redis.mode|single|"single" or "cluster"|
 |redis.network|tcp|"tcp" or "unix"|
-|redis.addr||Redis server address(es) in "host:port" form, can be semi-colon `;` separated in cluster mode|
+|redis.addr|localhost:6379|Redis server address(es) in "host:port" form, can be semi-colon `;` separated in cluster mode (where it has no default)|
 |redis.username||Redis server username|
 |redis.password||Redis server password|
 |redis.db|0|Redis server target db|
-|redis.max_redirects|0|The maximum number of retries before giving up (only for cluster mode)|
+|redis.max_redirects|0|Cluster mode: how many times a command is retried, on a `MOVED`/`ASK` redirect and on a connection error or timeout; 0 means go-redis's default, 3, and -1 none (below -1 is an error: go-redis would send nothing)|
 |redis.read_only|false|Enables read-only commands on slave nodes (only for cluster mode)|
 |redis.route_by_latency|false|Allows routing read-only commands to the closest master or slave node (only for cluster mode)|
 |redis.route_randomly|false|Allows routing read-only commands to the random master or slave node (only for cluster mode)|
-|redis.max_retries||Max retries before giving up connection|
-|redis.min_retry_backoff|8ms|Minimum backoff between each retry|
-|redis.max_retry_backoff|512ms|Maximum backoff between each retry|
+|redis.max_retries|0|Single mode: how many times a command (or a pipeline, whole) is retried on a connection error or timeout; 0 means go-redis's default, 3, and -1 none (below -1 is an error: go-redis would send nothing). In cluster mode see `redis.max_redirects` (0 there means no retries per node)|
+|redis.min_retry_backoff|8ms|Minimum backoff between each retry (0 means this default too; -1 none)|
+|redis.max_retry_backoff|512ms|Maximum backoff between each retry (0 means this default too; -1 none)|
 |redis.dial_timeout|5s|Dial timeout for establishing new connection|
-|redis.read_timeout|3s|Timeout for socket reads|
-|redis.write_timeout|3s|Timeout for socket writes|
-|redis.pool_size|10|Maximum number of socket connections|
-|redis.min_idle_conns|0|Minimum number of idle connections|
-|redis.max_idle_conns|0|Maximum number of idle connections. If <= 0, connections are not closed due to a connection's idle time.|
-|redis.max_conn_age|0|Connection age at which client closes the connection|
-|redis.pool_timeout|4s|Amount of time client waits for connections are busy before returning an error|
-|redis.idle_timeout|5m|Amount of time after which client closes idle connections. Should be less than server timeout|
-|redis.idle_check_frequency|1m|Frequency of idle checks made by idle connections reaper. Deprecated in favour of redis.max_idle_conns|
+|redis.read_timeout|3s|Timeout for socket reads; 0 means go-redis's default (5 s with v9.22.0, 3 s with v9.8.0); -2 sets no read deadlines at all; -1 is no timeout in single mode, while in cluster mode it is no deadline for pipelines (the `MULTI`/`EXEC` of `redis.datatype=json` reads and updates) and go-redis's default (5 s) for commands sent on their own (use -2 there)|
+|redis.write_timeout|redis.read_timeout|Timeout for socket writes; 0 means the same as `redis.read_timeout` (so `redis.read_timeout=30s` with `redis.write_timeout=0` is 30 s); -1 and -2 as for `redis.read_timeout`|
+|redis.pool_size|threadcount|Maximum number of socket connections (per node in cluster mode)|
+|redis.min_idle_conns|redis.pool_size|Minimum number of idle connections: dialed when the client starts, and redialed in the background as connections go (see below for what that does during an outage)|
+|redis.max_idle_conns|redis.pool_size|Maximum number of idle connections: 0 means no cap; a negative value closes every connection returned to the pool|
+|redis.max_conn_age|-1|Connection age at which client closes the connection; -1 never|
+|redis.pool_timeout|redis.read_timeout + 1s|Amount of time client waits for connections are busy before returning an error (from the value given for `redis.read_timeout`: about 1 s for its 0, -1 or -2)|
+|redis.idle_timeout|-1|Amount of time after which client closes idle connections. Should be less than server timeout; -1 never|
 |redis.tls_ca||Path to CA file|
 |redis.tls_cert||Path to cert file|
 |redis.tls_key||Path to key file|
 |redis.tls_insecure_skip_verify|false|Controls whether a client verifies the server's certificate chain and host name|
+|redis.protocol|3|RESP version, 2 or 3|
+|redis.maint_notifications|disabled|go-redis maintenance notifications (`CLIENT MAINT_NOTIFICATIONS ON` on every new connection): `disabled`, `auto` (go-redis v9.22.0's default: sent, and dropped if the server rejects it) or `enabled`|
+|redis.read_buffer_size|4096|Bytes of each connection's read buffer (go-redis v9.22.0's default is 32768)|
+|redis.write_buffer_size|4096|Bytes of each connection's write buffer (go-redis v9.22.0's default is 32768)|
+|redis.dialer_retries|1|Dial attempts for a new connection (go-redis's `DialerRetries`: its default is 5, 100 ms apart)|
+|redis.max_concurrent_dials|0|Connections dialed at once for callers waiting for one, per node; 0 means `redis.pool_size`, the most go-redis allows. It doesn't limit the dials that keep `redis.min_idle_conns` idle connections|
+|redis.routing_policies|false|Cluster mode: go-redis's command routing policies, which look up `COMMAND` information for every command sent on its own. Without them, go-redis v9.22.0 sends a keyless command (`PING`, `DBSIZE`, ...) to any node, replicas included, where v9.8.0 sent it to the master of a "random" slot (its random source had a fixed seed, so nearly always the same master), go-ycsb's own startup check included. No effect in single mode (a warning says so)|
+|redis.cluster_state_reload_interval|10s|Cluster mode: how often the slot map is reloaded (`CLUSTER SLOTS`) without a `MOVED` asking for it (go-redis v9.22.0's default is 60s)|
+
+go-ycsb used go-redis v9.8.0 before v9.22.0; the last eight properties (and the backoffs' 0) keep the client's wire and resource behaviour by default what it was with v9.8.0 (no `CLIENT MAINT_NOTIFICATIONS`, no `COMMAND` lookups, 4 KiB buffers, one dial attempt, the slot map reloaded every 10 s), so that runs compare across go-ycsb builds, and make go-redis's newer behaviour opt-in. One difference can't be configured back exactly: go-redis tops `redis.min_idle_conns` up in the background after handing out an idle connection and after removing one (both versions), and v9.22.0 also on every miss of a node's pool (a caller finding no idle connection). With go-ycsb's default `redis.min_idle_conns` (`redis.pool_size`, i.e. `threadcount`) a node that is down then sees more background dials. Their effect depends on the load and on the outage, and can go either way: on 17 local masters, one crashed (port closed) for 10 s under an unthrottled load, 800 threads, one record at a time, v9.8.0 counted 16,237 failed records (p99 0.43 s each) and v9.22.0 14,426 (p99 0.55 s); one stalled for 15 s, both failed one record per thread, after 12.1 s. Other setups have shown larger differences (several times the error latency, more or fewer failed records with 800 threads), which `redis.min_idle_conns=0` brings back to v9.8.0's numbers, at the cost of no connections dialed ahead when the client starts (some 13,600 connections in steady state at 800 threads on 17 masters, about a third without). So error counts and latencies during outages may not compare exactly with go-ycsb builds on go-redis v9.8.0; steady-state behaviour does.
+
+Other differences from go-redis v9.8.0 that no property changes:
+
+- With `redis.read_only=true` and neither `redis.route_by_latency` nor `redis.route_randomly`, a read goes to a replica picked round-robin (one counter for the process) where v9.8.0 picked one at random, and go-redis pings (100 ms timeout) each replica the first time it is picked and after it was marked failing. With one replica per shard the node chosen is the same; only the pings are new.
+- TCP keep-alive on new connections: probes after 30 s idle, every 5 s, 3 of them, where v9.8.0 used a 5 min keep-alive period. A dead peer is found sooner on an idle connection. No property sets it.
+- An explicit `redis.read_timeout=0` (and `-1` for commands sent on their own in cluster mode) means go-redis's default, now 5 s instead of 3 s.
+- go-redis's random source is no longer seeded with 1, so node order, replica choice and retry jitter differ from run to run.
+- go-redis retries a few more kinds of errors (`NOREPLICAS`, dial errors wrapped in a deadline, wrapped errors): this changes failure paths only.
+- With `redis.read_only`, `redis.route_by_latency` or `redis.route_randomly`, every read-only command and pipeline reads go-redis's `COMMAND` information under one process-wide exclusive lock (v9.8.0 read it without a lock once loaded): possibly more contention at high thread counts with those options; not measured.
+
+The `redis.*` properties above restore v9.8.0's wire and timing behaviour, not its CPU cost: on reads and updates the client spends some 7.5-10% more CPU per operation with go-redis v9.22.0 (in a local microbenchmark with `perf stat` and rusage, 5 to 6 alternating runs, no errors, workload A, CPU per operation, a build on go-redis v9.8.0 → this build on v9.22.0: against a fake server 42.8 → 46.0 µs, against a real Redis 8.6 41.4 → 44.5 µs, against a 6-node cluster 59.8 → 65.6 µs), almost all of it inside go-redis (connection pool, push-notification checks, metrics hooks, deadlines). So on a client that is CPU-bound, don't compare throughput across builds on go-redis v9.8.0 and this one.
+
+With `dropdata=true` the database runs `FLUSHDB` (synchronous unless the server's `lazyfree-lazy-user-flush` is `yes`) under `redis.read_timeout`, each try under the timeout: in cluster mode every master, retried as many times as `redis.max_retries` says (none by default: 0 there means no retries per node); in single mode retried as `redis.max_retries` says (go-redis's 3 by default). Flushing a large database can take longer, and fail the run's start: flush it beforehand, or give that run a longer `redis.read_timeout`.
+
+The durations (`redis.dial_timeout`, `redis.read_timeout`, `redis.write_timeout`, `redis.pool_timeout`, `redis.min_retry_backoff`, `redis.max_retry_backoff`, `redis.max_conn_age`, `redis.idle_timeout`, `redis.cluster_state_reload_interval`) take a Go duration such as `30s` or `500ms`, or an integer number of nanoseconds (`-1` disables `redis.max_conn_age`/`redis.idle_timeout`). Any other value is an error: before, a value such as `30s` was ignored and the default used. The same holds for the integer and boolean `redis.*` properties (booleans take `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`): a value such as `redis.read_buffer_size=32k` or `redis.routing_policies=enabled` fails the run, naming the property, where before it was the default (or, for a boolean, false).
 
 ### BoltDB
 
