@@ -326,7 +326,7 @@ func TestIntervalTotalMatchesOpsPipeline(t *testing.T) {
 	recorded := make(chan struct{})
 	go func() {
 		for ev := range ch {
-			h.Measure(ev.op, ev.start, ev.lan)
+			h.Measure(ev.op, time.Unix(0, ev.startNs), ev.lan)
 		}
 		close(recorded)
 	}()
@@ -338,8 +338,8 @@ func TestIntervalTotalMatchesOpsPipeline(t *testing.T) {
 			op := []string{"READ", "UPDATE"}[th%2]
 			for i := 0; i < perThread; i++ {
 				lat := time.Duration(i%3000) * time.Microsecond
-				ch <- measureEvent{op, time.Now(), lat}
-				ch <- measureEvent{"TOTAL", time.Now(), lat}
+				ch <- measureEvent{op, time.Now().UnixNano(), lat, 1}
+				ch <- measureEvent{"TOTAL", time.Now().UnixNano(), lat, 1}
 			}
 		}(th)
 	}

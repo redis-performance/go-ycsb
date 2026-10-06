@@ -16,6 +16,7 @@ package workload
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -400,39 +401,45 @@ func (c *core) DoInsert(ctx context.Context, db ycsb.DB) error {
 		// Sleep for a random time betweensz [0.8, 1.2)*insertionRetryInterval
 		sleepTimeMs := float64((c.insertionRetryInterval * 1000)) * (0.8 + 0.4*r.Float64())
 
-		time.Sleep(time.Duration(sleepTimeMs) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(time.Duration(sleepTimeMs) * time.Millisecond):
+		}
 	}
 
 	return err
 }
 
-// DoBatchInsert implements the Workload DoBatchInsert interface.
+// DoBatchInsert implements the Workload DoBatchInsert interface: it inserts
+// the next batchSize records of the key sequence in one batch, retrying (like
+// DoInsert) only the records that failed.
 func (c *core) DoBatchInsert(ctx context.Context, batchSize int, db ycsb.DB) error {
-	batchDB, ok := db.(ycsb.BatchDB)
+	batchDB, ok := db.(ycsb.BatchInserter)
 	if !ok {
-		return fmt.Errorf("the %T does't implement the batchDB interface", db)
+		return fmt.Errorf("%T doesn't implement ycsb.BatchInserter", db)
 	}
 	state := ctx.Value(stateKey).(*coreState)
 	r := state.r
-	var keys []string
-	var values []map[string][]byte
+	keys := make([]string, batchSize)
+	values := make([]map[string][]byte, batchSize)
 	for i := 0; i < batchSize; i++ {
 		keyNum := c.keySequence.Next(r)
-		dbKey := c.buildKeyName(keyNum)
-		keys = append(keys, dbKey)
-		values = append(values, c.buildValues(state, dbKey))
+		keys[i] = c.buildKeyName(keyNum)
+		values[i] = c.buildValues(state, keys[i])
 	}
-	defer func() {
+	defer func(values []map[string][]byte) {
 		for _, value := range values {
 			c.putValues(value)
 		}
-	}()
+	}(values)
 
 	numOfRetries := int64(0)
 	var err error
 	for {
 		err = batchDB.BatchInsert(ctx, c.table, keys, values)
-		if err != nil {
+		// See DoInsert: only a failed batch goes on to the retry logic.
+		if err == nil {
 			break
 		}
 
@@ -452,10 +459,31 @@ func (c *core) DoBatchInsert(ctx context.Context, batchSize int, db ycsb.DB) err
 			break
 		}
 
-		// Sleep for a random time betweensz [0.8, 1.2)*insertionRetryInterval
+		// Retry the records that failed, not those that are in already.
+		var be *ycsb.BatchError
+		if errors.As(err, &be) && len(be.Errs) == len(keys) {
+			var failedKeys []string
+			var failedValues []map[string][]byte
+			for i, recErr := range be.Errs {
+				if recErr != nil {
+					failedKeys = append(failedKeys, keys[i])
+					failedValues = append(failedValues, values[i])
+				}
+			}
+			if len(failedKeys) > 0 {
+				keys, values = failedKeys, failedValues
+			}
+		}
+
+		// Sleep for a random time betweensz [0.8, 1.2)*insertionRetryInterval,
+		// but not past the run's stop: then the batch isn't resent.
 		sleepTimeMs := float64((c.insertionRetryInterval * 1000)) * (0.8 + 0.4*r.Float64())
 
-		time.Sleep(time.Duration(sleepTimeMs) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(time.Duration(sleepTimeMs) * time.Millisecond):
+		}
 	}
 	return err
 }
@@ -484,7 +512,7 @@ func (c *core) DoTransaction(ctx context.Context, db ycsb.DB) error {
 func (c *core) DoBatchTransaction(ctx context.Context, batchSize int, db ycsb.DB) error {
 	batchDB, ok := db.(ycsb.BatchDB)
 	if !ok {
-		return fmt.Errorf("the %T does't implement the batchDB interface", db)
+		return fmt.Errorf("%T doesn't implement ycsb.BatchDB", db)
 	}
 	state := ctx.Value(stateKey).(*coreState)
 	r := state.r
@@ -543,10 +571,27 @@ func (c *core) doTransactionRead(ctx context.Context, db ycsb.DB, state *coreSta
 	return nil
 }
 
-func (c *core) doTransactionReadModifyWrite(ctx context.Context, db ycsb.DB, state *coreState) error {
+// measure records a sample (a variable for the tests).
+var measure = measurement.Measure
+
+func (c *core) doTransactionReadModifyWrite(ctx context.Context, db ycsb.DB, state *coreState) (err error) {
+	// as for its READ and UPDATE: one the run's stop came before isn't run,
+	// and counts as nothing (also when the stop came between its read and
+	// its update, which the client then didn't send); a failure is
+	// READ_MODIFY_WRITE_ERROR
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ycsb.ErrNotRun, err)
+	}
 	start := time.Now()
 	defer func() {
-		measurement.Measure("READ_MODIFY_WRITE", start, time.Now().Sub(start))
+		if errors.Is(err, ycsb.ErrNotRun) {
+			return
+		}
+		op := "READ_MODIFY_WRITE"
+		if err != nil {
+			op += "_ERROR"
+		}
+		measure(op, start, time.Now().Sub(start))
 	}()
 
 	r := state.r
@@ -574,7 +619,7 @@ func (c *core) doTransactionReadModifyWrite(ctx context.Context, db ycsb.DB, sta
 		return err
 	}
 
-	if err := db.Update(ctx, c.table, keyName, values); err != nil {
+	if err = db.Update(ctx, c.table, keyName, values); err != nil {
 		return err
 	}
 

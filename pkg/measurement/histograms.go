@@ -58,6 +58,11 @@ func (h *histograms) GenerateExtendedOutputs() {
 }
 
 func (h *histograms) Measure(op string, start time.Time, lan time.Duration) {
+	h.MeasureN(op, start, lan, 1)
+}
+
+// MeasureN records n samples of lan for op.
+func (h *histograms) MeasureN(op string, start time.Time, lan time.Duration, n int64) {
 	if h.windows {
 		h.cut.RLock()
 		defer h.cut.RUnlock()
@@ -79,7 +84,7 @@ func (h *histograms) Measure(op string, start time.Time, lan time.Duration) {
 		h.mu.Unlock()
 	}
 
-	opM.Measure(lan)
+	opM.MeasureN(lan, n)
 }
 
 func (h *histograms) summary() map[string][]string {

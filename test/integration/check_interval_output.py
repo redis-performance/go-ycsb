@@ -4,10 +4,12 @@
 Used by interval_output.sh; kept separate so it can be linted and run on its
 own. Needs Python 3.10+ (itertools.pairwise):
 
-    check_interval_output.py INTERVALS_JSONL RUN_LOG THREADCOUNT LAUNCH_WALL INTERVAL_S
+    check_interval_output.py INTERVALS_JSONL RUN_LOG THREADCOUNT LAUNCH_WALL INTERVAL_S [BATCH_SIZE [OPS]]
 
 LAUNCH_WALL is the wall clock (Unix seconds) just before go-ycsb was started,
-INTERVAL_S the configured interval. The run must have had no warm-up.
+INTERVAL_S the configured interval, BATCH_SIZE the run's batch.size (default
+1), OPS the comma-separated operations it records besides *_ERROR (default
+READ,UPDATE,TOTAL). The run must have had no warm-up.
 
 The checks follow what the run itself recorded, not how long it was meant to
 take, so a slow runner (late start, stalls, a long final drain, a wall-clock
@@ -35,11 +37,12 @@ def ts_seconds(ts):
 
 def is_success(op):
     # READ_MODIFY_WRITE is recorded on its own, without a TOTAL sample; its
-    # inner READ and UPDATE are the ones that record TOTAL.
-    return op not in ("TOTAL", "READ_MODIFY_WRITE") and not op.endswith("_ERROR")
+    # inner READ and UPDATE are the ones that record TOTAL. Likewise a
+    # BATCH_<OP> sample stands for a batch whose records are counted as <OP>.
+    return op not in ("TOTAL", "READ_MODIFY_WRITE") and not op.startswith("BATCH_") and not op.endswith("_ERROR")
 
 
-def check(recs, text, threads, launch, interval):
+def check(recs, text, threads, launch, interval, batch=1, expected=("READ", "UPDATE", "TOTAL")):
     fail = []
     # the final summary: operation -> (Takes(s), Count, Min(us), Max(us))
     summary = text[text.find("Run finished") :]
@@ -54,7 +57,7 @@ def check(recs, text, threads, launch, interval):
     for r in recs:
         by.setdefault(r["op"], []).append(r)
     # ops cut short by the SIGINT can show up as *_ERROR
-    expected = {"READ", "UPDATE", "TOTAL"}
+    expected = set(expected)
     if not expected <= set(by) or any(op not in expected and not op.endswith("_ERROR") for op in by):
         fail.append(f"ops {sorted(by)}")
 
@@ -159,7 +162,9 @@ def check(recs, text, threads, launch, interval):
     # TOTAL counts the successful operations. Each client thread records the
     # operation, then TOTAL, through one FIFO channel that a single goroutine
     # drains, so a cut sees a prefix of it: up to the cut, the operations lead
-    # TOTAL by at most one sample per thread, and never trail it. (With a
+    # TOTAL by at most one sample per thread, and never trail it. A batch's
+    # sample is all its records (the operation's n, then TOTAL's n), so with
+    # batches the lead is up to batch.size records per thread. (With a
     # warm-up a thread could record TOTAL but not its operation, which is why
     # the run must have none.) Over the run, they match exactly.
     total_by_ts = {r["ts"]: r["count"] for r in by.get("TOTAL", [])}
@@ -167,10 +172,10 @@ def check(recs, text, threads, launch, interval):
     for ts in seq:
         ops_cum += sum(r["count"] for r in recs if r["ts"] == ts and is_success(r["op"]))
         total_cum += total_by_ts.get(ts, 0)
-        if not 0 <= ops_cum - total_cum <= threads:
+        if not 0 <= ops_cum - total_cum <= threads * batch:
             fail.append(
                 f"interval {ts}: operations so far {ops_cum}, TOTAL so far {total_cum}: "
-                f"want the operations ahead by 0..{threads}"
+                f"want the operations ahead by 0..{threads * batch}"
             )
     if ops_cum != total_cum:
         fail.append(f"over the run TOTAL is {total_cum}, the operations {ops_cum}")
@@ -179,11 +184,13 @@ def check(recs, text, threads, launch, interval):
 
 def main(argv):
     path, log, threads, launch, interval = argv[1], argv[2], int(argv[3]), float(argv[4]), float(argv[5])
+    batch = int(argv[6]) if len(argv) > 6 else 1
+    expected = tuple(argv[7].split(",")) if len(argv) > 7 else ("READ", "UPDATE", "TOTAL")
     with open(path) as f:
         recs = [json.loads(line) for line in f]
     with open(log, errors="replace") as f:
         text = f.read()
-    fail, cut, by = check(recs, text, threads, launch, interval)
+    fail, cut, by = check(recs, text, threads, launch, interval, batch, expected)
     if fail:
         print("FAIL:\n  " + "\n  ".join(fail))
         return 1
