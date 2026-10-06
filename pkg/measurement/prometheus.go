@@ -14,6 +14,7 @@ package measurement
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -251,7 +252,11 @@ func startPrometheus(cfg promConfig, h *histograms, p *properties.Properties) er
 	e.server = &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	activePrometheus.Store(e)
 	fmt.Fprintf(os.Stderr, "Prometheus exporter listening on %s\n", listener.Addr())
-	go e.server.Serve(listener)
+	go func() {
+		if err := e.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "Prometheus exporter serve: %v\n", err)
+		}
+	}()
 	return nil
 }
 

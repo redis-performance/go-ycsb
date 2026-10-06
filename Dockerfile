@@ -20,7 +20,7 @@ RUN GO111MODULE=on go build -ldflags "-X github.com/pingcap/go-ycsb/pkg/measurem
 
 FROM alpine:3.21
 
-RUN apk add --no-cache dumb-init
+RUN apk add --no-cache dumb-init && ln -s /usr/bin/dumb-init /usr/local/bin/dumb-init
 
 COPY --from=0 /go-ycsb /go-ycsb
 
@@ -28,4 +28,4 @@ ADD workloads /workloads
 
 EXPOSE 6060
 
-ENTRYPOINT [ "/usr/bin/dumb-init", "/go-ycsb" ]
+ENTRYPOINT [ "/usr/local/bin/dumb-init", "/go-ycsb" ]
