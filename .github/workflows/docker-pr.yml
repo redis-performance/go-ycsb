@@ -28,4 +28,3 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=${{ github.sha }}
           push: false
-          cache-from: type=gha
