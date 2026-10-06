@@ -192,7 +192,7 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
 
 ### Prometheus exporter
 
-The opt-in exporter serves live counters and the last completed interval's latency measurements. For example,
+The opt-in exporter serves live counters, cumulative latency histograms, and the last completed interval's latency measurements. For example,
 `-p measurement.prometheus_listen=127.0.0.1:9464 -p measurement.prometheus_labels=phase=run -p measurement.interval=1s -p debug.pprof=127.0.0.1:6060`
 uses one-second windows. Set the Prometheus or Alloy scrape interval to one second or less for the best window
 coverage, and use its `remote_write` to retain the series in a long-term metrics store. The endpoint holds only the
@@ -209,17 +209,27 @@ so bind it to loopback or another private address too.
 | `ycsb_info{workload,command,threadcount,batch_size,target,version}` | process configuration; value 1 |
 | `ycsb_phase_running` | 1 from the start of `Client.Run`, 0 after final counts are drained and printed |
 | `ycsb_operations_total{op}`, `ycsb_errors_total{op}` | cumulative counts from the same histograms as the final summary; batches and failed records follow the Counting rules above |
+| `ycsb_latency_seconds_bucket{op,le}`, `ycsb_latency_seconds_sum{op}`, `ycsb_latency_seconds_count{op}` | cumulative Prometheus histogram for each raw operation name, including `READ_ERROR` and other failures; fixed bucket bounds span 100 µs to 60 s, plus `+Inf` |
 | `ycsb_interval_latency_seconds{op,quantile}` | p50, p90, p95, p99 and p99.9 of the last completed interval, in seconds |
 | `ycsb_interval_latency_avg_seconds{op}`, `ycsb_interval_latency_max_seconds{op}` | mean and max latency of that interval, in seconds |
 | `ycsb_interval_operations{op}` | samples in that interval |
 | `ycsb_interval_window_seconds`, `ycsb_interval_end_timestamp_seconds` | length and end time of that interval |
 
+The Prometheus histogram is updated from the same samples as the HDR histogram used for summaries. Its buckets,
+count and sum accumulate for the life of the process; `_sum` uses the original nanosecond durations, while HDR
+summaries round latencies to microseconds. `rate(ycsb_latency_seconds_bucket[5m])` can feed
+`histogram_quantile()` for a rolling latency estimate. For example,
+`histogram_quantile(0.99, sum by (le, op) (rate(ycsb_latency_seconds_bucket[5m])))` estimates p99 per operation;
+retain the desired run labels in the grouping when scraping multiple runs.
+`TOTAL` repeats successful per-operation samples, and `BATCH_*` measures batch calls; keep these separate from
+record-level operations when aggregating distributions.
 Interval series appear after the first interval ends, and an operation's interval series are omitted when it had no
-samples in that window. Latency quantiles are gauges for one window, not Prometheus summaries: don't apply `rate()`
-to them. Counters are live and may differ briefly across operations during a scrape; once `ycsb_phase_running` is
-zero, they match the final summary. External run labels belong in the scraper, not in go-ycsb. Enabling the exporter
-keeps per-interval histograms even without an interval file, so the single measurement goroutine pays the same
-window recording and cut cost as `measurement.interval_output_file`; the worker hot path is unchanged. No existing
+samples in that window. Interval quantiles are gauges for one window: don't apply `rate()` to them. Counters and
+histogram series are live and may differ briefly across operations during a scrape. Once `ycsb_phase_running` is
+zero, the operation and error counters and histogram `_count` values match the final summary; buckets and sums hold
+the final distribution data. External run labels belong in the scraper, not in go-ycsb. Enabling the exporter
+keeps per-interval histograms even without an interval file, and the single measurement goroutine also updates the
+fixed Prometheus buckets. The worker hot path is unchanged. No existing
 output changes when the exporter is off.
 
 Each line of `measurement.interval_output_file` describes one operation over one interval, e.g.:

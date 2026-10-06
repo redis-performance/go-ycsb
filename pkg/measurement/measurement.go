@@ -141,6 +141,7 @@ func InitMeasure(p *properties.Properties) {
 		}
 		if promConfig.listen != "" {
 			h.windows = true
+			h.prometheus = true
 			if err := startPrometheus(promConfig, h, p); err != nil {
 				util.Fatalf("%v", err)
 			}

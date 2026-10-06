@@ -13,6 +13,7 @@
 package measurement
 
 import (
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,7 @@ func TestParsePromConfig(t *testing.T) {
 		{"internal name", "__name__=load", "", true},
 		{"duplicate", "phase=load,phase=run", "", true},
 		{"reserved", "op=READ", "", true},
+		{"histogram label", "le=0.001", "", true},
 		{"bad UTF8", "phase=\xff", "", true},
 		{"negative linger", "phase=run", "-1s", true},
 		{"bad linger", "phase=run", "bad", true},
@@ -82,6 +84,24 @@ func metricValue(t *testing.T, body, prefix string) float64 {
 	return 0
 }
 
+func histogramValue(t *testing.T, body, name, op, le string) float64 {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, name+"{") || !strings.Contains(line, "op=\""+op+"\"") ||
+			(le != "" && !strings.Contains(line, "le=\""+le+"\"")) {
+			continue
+		}
+		fields := strings.Fields(line)
+		value, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	t.Fatalf("histogram %s op=%s le=%s absent from:\n%s", name, op, le, body)
+	return 0
+}
+
 func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	p := properties.NewProperties()
 	p.Set(prop.Workload, "core")
@@ -89,6 +109,7 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	p.Set(prop.ThreadCount, "4")
 	h := InitHistograms(p)
 	h.windows = true
+	h.prometheus = true
 	start := time.Unix(1000, 0)
 	h.startIntervals(start)
 	h.MeasureN("READ", start, time.Millisecond, 2)
@@ -153,6 +174,18 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	if got := metricValue(t, body, "ycsb_interval_latency_seconds{op=\"READ\",phase=\"load\",quantile=\"0.99\""); got < 0.0009 || got > 0.0011 {
 		t.Errorf("READ p99 = %v seconds", got)
 	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_count", "READ", ""); got != 2 {
+		t.Errorf("READ histogram count = %v, want 2", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_bucket", "READ", "0.001"); got != 2 {
+		t.Errorf("READ <=1ms bucket = %v, want 2", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_sum", "READ", ""); math.Abs(got-0.002) > 1e-12 {
+		t.Errorf("READ histogram sum = %v, want 0.002", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_count", "READ_ERROR", ""); got != 1 {
+		t.Errorf("READ_ERROR histogram count = %v, want 1", got)
+	}
 	c.phaseRunning.Store(0)
 	if got := metricValue(t, get("/metrics").Body.String(), "ycsb_phase_running{"); got != 0 {
 		t.Errorf("phase running after output = %v", got)
@@ -168,6 +201,9 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	}
 	if got := metricValue(t, body, "ycsb_operations_total{op=\"READ\""); got != 2 {
 		t.Errorf("cumulative READ after second window = %v", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_count", "READ", ""); got != 2 {
+		t.Errorf("READ histogram count after second window = %v, want 2", got)
 	}
 	h.writeInterval(start.Add(3 * time.Second)) // an idle interval still has a time marker
 	body = get("/metrics").Body.String()
@@ -187,6 +223,53 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	}
 	if got := metricValue(t, body, "ycsb_interval_operations{op=\"READ\""); got != 1 {
 		t.Errorf("READ in final partial window = %v", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_count", "READ", ""); got != 3 {
+		t.Errorf("READ histogram final count = %v, want 3", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_bucket", "READ", "0.001"); got != 2 {
+		t.Errorf("READ <=1ms bucket after final window = %v, want 2", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_bucket", "READ", "0.004"); got != 3 {
+		t.Errorf("READ <=4ms bucket = %v, want 3", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_bucket", "READ", "+Inf"); got != 3 {
+		t.Errorf("READ +Inf bucket = %v, want 3", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_sum", "READ", ""); math.Abs(got-0.006) > 1e-12 {
+		t.Errorf("READ histogram final sum = %v, want 0.006", got)
+	}
+}
+
+func TestPrometheusHistogramBoundariesAndOverflow(t *testing.T) {
+	p := properties.NewProperties()
+	h := InitHistograms(p)
+	h.prometheus = true
+	h.MeasureN("READ", time.Now(), time.Millisecond, 2)
+	h.MeasureN("READ", time.Now(), time.Millisecond+time.Nanosecond, 1)
+	h.MeasureN("READ", time.Now(), 70*time.Second, 1)
+	h.MeasureN("READ", time.Now(), 48*time.Hour, 1) // beyond HDR's range
+	e := &promExporter{collector: newPromCollector(h, p)}
+	handler, err := e.handler(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRecorder()
+	handler.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if r.Code != http.StatusOK {
+		t.Fatalf("scrape: HTTP %d: %s", r.Code, r.Body)
+	}
+	body := r.Body.String()
+	for le, want := range map[string]float64{"0.00075": 0, "0.001": 2, "0.00125": 3, "60": 3, "+Inf": 4} {
+		if got := histogramValue(t, body, "ycsb_latency_seconds_bucket", "READ", le); got != want {
+			t.Errorf("READ le=%s bucket = %v, want %v", le, got, want)
+		}
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_count", "READ", ""); got != 4 {
+		t.Errorf("READ count = %v, want 4", got)
+	}
+	if got := histogramValue(t, body, "ycsb_latency_seconds_sum", "READ", ""); math.Abs(got-70.003000001) > 1e-9 {
+		t.Errorf("READ sum = %v, want 70.003000001", got)
 	}
 }
 

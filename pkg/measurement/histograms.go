@@ -25,6 +25,8 @@ type histograms struct {
 	// or the Prometheus exporter is set. Set before the first Measure and never
 	// changed after, so runs without either pay only for cumulative histograms.
 	windows bool
+	// prometheus adds fixed cumulative latency buckets only for exported runs.
+	prometheus bool
 	// cut makes an interval cut atomic across operations: recording holds it
 	// shared, a cut holds it exclusively while it takes every window (only with
 	// windows).
@@ -79,6 +81,9 @@ func (h *histograms) MeasureN(op string, start time.Time, lan time.Duration, n i
 		opM, ok = h.histograms[op]
 		if !ok {
 			opM = newHistogram(h.windows)
+			if h.prometheus {
+				opM.promBuckets = make([]uint64, len(promLatencyBucketsUs))
+			}
 			h.histograms[op] = opM
 		}
 		h.mu.Unlock()

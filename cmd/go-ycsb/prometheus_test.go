@@ -178,6 +178,9 @@ func TestPrometheusFakeCommandCountsMatchSummary(t *testing.T) {
 		if got := fakeMetric(t, body, name, op); got != want {
 			t.Errorf("%s %s = %d, summary = %d", name, op, got, want)
 		}
+		if got := fakeMetric(t, body, "ycsb_latency_seconds_count", row["Operation"]); got != want {
+			t.Errorf("histogram count %s = %d, summary = %d", row["Operation"], got, want)
+		}
 	}
 	for _, expected := range []struct {
 		name, op string

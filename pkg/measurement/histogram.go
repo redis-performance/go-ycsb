@@ -14,6 +14,7 @@
 package measurement
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -33,6 +34,19 @@ type histogram struct {
 	// at each interval so recording never waits for the reporter's reads.
 	win   *hdrhistogram.Histogram
 	spare *hdrhistogram.Histogram
+	// promBuckets hold counts for fixed latency bounds, with an implicit +Inf
+	// bucket. They and promSumSeconds are populated only when the exporter is on.
+	promBuckets    []uint64
+	promSumSeconds float64
+}
+
+// Fixed bounds keep Prometheus histogram series stable across scrapes. The
+// measurements use microseconds, so each bound converts exactly to a duration.
+var promLatencyBucketsUs = []int64{
+	100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 3000,
+	4000, 5000, 7500, 10000, 12500, 15000, 20000, 25000, 30000,
+	40000, 50000, 75000, 100000, 150000, 200000, 300000, 500000,
+	1000000, 2000000, 5000000, 10000000, 30000000, 60000000,
 }
 
 // Metric name.
@@ -76,7 +90,15 @@ func (h *histogram) Measure(latency time.Duration) {
 func (h *histogram) MeasureN(latency time.Duration, n int64) {
 	us := latency.Microseconds()
 	h.mu.Lock()
-	h.hist.RecordValues(us, n)
+	if err := h.hist.RecordValues(us, n); err == nil && h.promBuckets != nil && n > 0 {
+		h.promSumSeconds += latency.Seconds() * float64(n)
+		i := sort.Search(len(promLatencyBucketsUs), func(i int) bool {
+			return latency <= time.Duration(promLatencyBucketsUs[i])*time.Microsecond
+		})
+		if i < len(h.promBuckets) {
+			h.promBuckets[i] += uint64(n)
+		}
+	}
 	if h.win != nil {
 		h.win.RecordValues(us, n)
 	}

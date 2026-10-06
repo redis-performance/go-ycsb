@@ -50,7 +50,7 @@ func parsePromLabels(value string) (prometheus.Labels, error) {
 		return labels, nil
 	}
 	reserved := map[string]bool{
-		"op": true, "quantile": true, "workload": true, "command": true,
+		"op": true, "le": true, "quantile": true, "workload": true, "command": true,
 		"threadcount": true, "batch_size": true, "target": true, "version": true,
 	}
 	for _, entry := range strings.Split(value, ",") {
@@ -115,6 +115,7 @@ type promCollector struct {
 	running      *prometheus.Desc
 	ops          *prometheus.Desc
 	errors       *prometheus.Desc
+	latencyHist  *prometheus.Desc
 	latency      *prometheus.Desc
 	avg          *prometheus.Desc
 	max          *prometheus.Desc
@@ -130,17 +131,18 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 		return prometheus.NewDesc(name, help, labels, nil)
 	}
 	return &promCollector{
-		h:       h,
-		info:    desc("ycsb_info", "Configuration of this YCSB process.", "workload", "command", "threadcount", "batch_size", "target", "version"),
-		running: desc("ycsb_phase_running", "One while the load or run phase is active; zero after final counts are available."),
-		ops:     desc("ycsb_operations_total", "Cumulative successful operations or sent batches, as counted in the final summary.", "op"),
-		errors:  desc("ycsb_errors_total", "Cumulative failed operations, as counted in the final summary.", "op"),
-		latency: desc("ycsb_interval_latency_seconds", "Latency quantile in the last completed interval, in seconds.", "op", "quantile"),
-		avg:     desc("ycsb_interval_latency_avg_seconds", "Mean latency in the last completed interval, in seconds.", "op"),
-		max:     desc("ycsb_interval_latency_max_seconds", "Maximum latency in the last completed interval, in seconds.", "op"),
-		count:   desc("ycsb_interval_operations", "Operations in the last completed interval.", "op"),
-		window:  desc("ycsb_interval_window_seconds", "Length of the last completed interval, in seconds."),
-		end:     desc("ycsb_interval_end_timestamp_seconds", "End of the last completed interval, Unix seconds."),
+		h:           h,
+		info:        desc("ycsb_info", "Configuration of this YCSB process.", "workload", "command", "threadcount", "batch_size", "target", "version"),
+		running:     desc("ycsb_phase_running", "One while the load or run phase is active; zero after final counts are available."),
+		ops:         desc("ycsb_operations_total", "Cumulative successful operations or sent batches, as counted in the final summary.", "op"),
+		errors:      desc("ycsb_errors_total", "Cumulative failed operations, as counted in the final summary.", "op"),
+		latencyHist: desc("ycsb_latency_seconds", "Cumulative latency distribution for this operation, in seconds.", "op"),
+		latency:     desc("ycsb_interval_latency_seconds", "Latency quantile in the last completed interval, in seconds.", "op", "quantile"),
+		avg:         desc("ycsb_interval_latency_avg_seconds", "Mean latency in the last completed interval, in seconds.", "op"),
+		max:         desc("ycsb_interval_latency_max_seconds", "Maximum latency in the last completed interval, in seconds.", "op"),
+		count:       desc("ycsb_interval_operations", "Operations in the last completed interval.", "op"),
+		window:      desc("ycsb_interval_window_seconds", "Length of the last completed interval, in seconds."),
+		end:         desc("ycsb_interval_end_timestamp_seconds", "End of the last completed interval, Unix seconds."),
 		infoVals: []string{
 			p.GetString(prop.Workload, "core"), p.GetString(prop.Command, ""),
 			p.GetString(prop.ThreadCount, "1"),
@@ -151,7 +153,7 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 }
 
 func (c *promCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{c.info, c.running, c.ops, c.errors, c.latency,
+	for _, d := range []*prometheus.Desc{c.info, c.running, c.ops, c.errors, c.latencyHist, c.latency,
 		c.avg, c.max, c.count, c.window, c.end} {
 		ch <- d
 	}
@@ -166,9 +168,25 @@ func (c *promCollector) Collect(ch chan<- prometheus.Metric) {
 
 	c.h.mu.RLock()
 	counts := make(map[string]int64, len(c.h.histograms))
+	type latencySample struct {
+		count   uint64
+		sum     float64
+		buckets map[float64]uint64
+	}
+	latencies := make(map[string]latencySample, len(c.h.histograms))
 	for op, hist := range c.h.histograms {
 		hist.mu.Lock()
-		counts[op] = hist.hist.TotalCount()
+		count := hist.hist.TotalCount()
+		counts[op] = count
+		if hist.promBuckets != nil {
+			buckets := make(map[float64]uint64, len(promLatencyBucketsUs))
+			var cumulative uint64
+			for i, upperUs := range promLatencyBucketsUs {
+				cumulative += hist.promBuckets[i]
+				buckets[float64(upperUs)/1e6] = cumulative
+			}
+			latencies[op] = latencySample{uint64(count), hist.promSumSeconds, buckets}
+		}
 		hist.mu.Unlock()
 	}
 	c.h.mu.RUnlock()
@@ -195,6 +213,9 @@ func (c *promCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for op, n := range errCounts {
 		metric(c.errors, prometheus.CounterValue, float64(n), op)
+	}
+	for op, sample := range latencies {
+		ch <- prometheus.MustNewConstHistogram(c.latencyHist, sample.count, sample.sum, sample.buckets, op)
 	}
 
 	snapshot := c.h.iv.latest.Load()
