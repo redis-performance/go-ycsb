@@ -3,13 +3,8 @@ name: Docker Build PR
 on:
   pull_request:
     branches: [master]
-    paths:
-      - Dockerfile
-      - go.mod
-      - go.sum
-      - cmd/**
-      - pkg/**
-      - .github/workflows/docker*.yml
+    paths-ignore:
+      - '**.md'
 
 jobs:
   docker-build:

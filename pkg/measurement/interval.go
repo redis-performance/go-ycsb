@@ -179,6 +179,7 @@ func (h *histograms) writeInterval(now time.Time) {
 	windowS := now.Sub(h.iv.last).Seconds()
 	recs := h.cutIntervalLocked(now)
 	h.iv.latest.Store(&intervalSnapshot{records: recs, windowS: windowS, end: now})
+	// Keep publishing scrape windows even after interval file output fails.
 	if h.iv.out == nil || h.iv.err != nil {
 		return
 	}

@@ -173,19 +173,19 @@ func (c *promCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	c.h.mu.RUnlock()
 	ops := make(map[string]int64, len(counts))
-	errors := make(map[string]int64, len(counts))
+	errCounts := make(map[string]int64, len(counts))
 	for op, n := range counts {
 		if strings.HasSuffix(op, "_ERROR") {
 			base := strings.TrimSuffix(op, "_ERROR")
-			errors[base] = n
+			errCounts[base] = n
 			if _, seen := ops[base]; !seen {
 				ops[base] = counts[base]
 			}
 		} else {
 			ops[op] = n
 			if op != "TOTAL" && !strings.HasPrefix(op, "BATCH_") {
-				if _, seen := errors[op]; !seen {
-					errors[op] = counts[op+"_ERROR"]
+				if _, seen := errCounts[op]; !seen {
+					errCounts[op] = counts[op+"_ERROR"]
 				}
 			}
 		}
@@ -193,7 +193,7 @@ func (c *promCollector) Collect(ch chan<- prometheus.Metric) {
 	for op, n := range ops {
 		metric(c.ops, prometheus.CounterValue, float64(n), op)
 	}
-	for op, n := range errors {
+	for op, n := range errCounts {
 		metric(c.errors, prometheus.CounterValue, float64(n), op)
 	}
 
