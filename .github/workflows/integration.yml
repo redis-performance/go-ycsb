@@ -28,6 +28,30 @@ jobs:
         env:
           RECORDCOUNT: 100000
 
+  redis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      # go.yml doesn't run go test, so the redis adapter's unit tests (options,
+      # defaults on the wire against in-process fake nodes) run here.
+      - name: Redis adapter unit tests
+        run: go test -race ./db/redis/
+
+      # Starts (and tears down) its own disposable single Redis and 3-master
+      # Redis Cluster containers, the same command as
+      # `make test-integration-redis` locally.
+      - name: Redis adapter vs. dockerized Redis and Redis Cluster
+        run: make test-integration-redis
+
   stop-signal:
     runs-on: ubuntu-latest
     timeout-minutes: 10

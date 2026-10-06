@@ -48,6 +48,14 @@ check:
 test-integration-feature-store:
 	./test/integration/feature_store.sh
 
+# Runs a short feature-store load and run against a dockerized single Redis
+# and a 3-master Redis Cluster with the redis adapter's defaults: INSERT must
+# equal DBSIZE after the load, the run must report no errors, and no COMMAND
+# or CLIENT MAINT_NOTIFICATIONS may reach the nodes. Same target locally and
+# in CI.
+test-integration-redis:
+	./test/integration/redis.sh
+
 # Runs go-ycsb against a dockerized Redis and stops it with SIGINT, twice back
 # to back and via timeout -s INT, checking every run ends with its final summary.
 test-integration-stop-signal:

@@ -516,6 +516,11 @@ make test-integration-aerospike-tls
 # section
 make test-integration-couchbase
 
+# Redis adapter: a short load and run against a dockerized single Redis and a
+# 3-master Redis Cluster with the adapter's defaults (INSERT = DBSIZE, no
+# errors, no COMMAND or CLIENT MAINT_NOTIFICATIONS on the nodes)
+make test-integration-redis
+
 # Cosmos DB adapter (core + feature-store workloads, a cross-partition Scan,
 # a field-preservation regression check, and an
 # auto_create_container=false negative check) against a dockerized Azure
@@ -529,7 +534,7 @@ make test-integration-cosmosdb
 make test-integration-cosmosdb-tls
 ```
 
-All six integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
+All of these integration tests run in CI on every push/PR to `master` (see `.github/workflows/integration.yml`); see [CONTRIBUTING.md](CONTRIBUTING.md) for the full testing/review bar for PRs.
 
 ## TODO
 
