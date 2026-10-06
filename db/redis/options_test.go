@@ -34,7 +34,9 @@ func TestDurationProperties(t *testing.T) {
 		{value: "1m30s", want: 90 * time.Second},
 		{value: "500ms", want: 500 * time.Millisecond},
 		{value: "30000000000", want: 30 * time.Second},
+		{value: "0", want: 3 * time.Second}, // go-redis's default: v9.8.0's, not v9.22.0's 5 s
 		{value: "-1", want: -1},
+		{value: "-2", want: -2},
 		{value: "30", want: 30}, // nanoseconds, as before
 		{value: "thirty", bad: true},
 		{value: "30 s", bad: true},
@@ -223,7 +225,10 @@ func TestIntBoolPropertiesReachOptions(t *testing.T) {
 			c.MaxRetries, c.PoolSize, c.MinIdleConns, c.MaxIdleConns, c.MaxRedirects, c.ReadOnly, c.RouteByLatency, c.RouteRandomly)
 	}
 	p.Set(redisReadOnly, "off")
-	if c, _ = getOptionsCluster(p); c.ReadOnly {
+	if c, err = getOptionsCluster(p); err != nil {
+		t.Fatal(err)
+	}
+	if c.ReadOnly {
 		t.Error("read_only=off: read-only")
 	}
 }

@@ -12,13 +12,16 @@
 package redis
 
 import (
+	"context"
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/magiconair/properties"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
 )
 
@@ -79,7 +82,11 @@ func TestRetryBackoffZero(t *testing.T) {
 		t.Errorf("backoffs %v..%v, want 8ms..512ms", o.MinRetryBackoff, o.MaxRetryBackoff)
 	}
 	p.Set(redisMinRetryBackoff, "-1")
-	if so, _ := getOptionsSingle(p); so.MinRetryBackoff != -1 {
+	so, err := getOptionsSingle(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if so.MinRetryBackoff != -1 {
 		t.Errorf("min backoff -1: %v, want -1 (no backoff)", so.MinRetryBackoff)
 	}
 }
@@ -181,6 +188,45 @@ func TestRoutingPoliciesSingleModeWarning(t *testing.T) {
 	for _, props := range [][]string{nil, {redisRoutingPolicies, "false"}} {
 		if got := out(props...); strings.Contains(got, redisRoutingPolicies) {
 			t.Errorf("a warning with %v: %q", props, got)
+		}
+	}
+}
+
+// The read timeouts a cluster gives its nodes' clients are v9.8.0's: with
+// redis.read_timeout=-1 the cluster's pipelines have no deadline and the
+// commands sent on their own 3 s (v9.22.0 would give them 5 s); explicit
+// values reach the nodes as they are.
+func TestClusterNodeReadTimeout(t *testing.T) {
+	for _, c := range []struct {
+		value                string
+		cluster, read, write time.Duration
+	}{
+		{"-1", 0, 3 * time.Second, 3 * time.Second},
+		{"0", 3 * time.Second, 3 * time.Second, 3 * time.Second},
+		{"", 3 * time.Second, 3 * time.Second, 3 * time.Second},
+		{"7s", 7 * time.Second, 7 * time.Second, 7 * time.Second},
+		{"-2", -2, -1, -1}, // no deadlines at all
+	} {
+		var props []string
+		if c.value != "" {
+			props = []string{redisReadTimeout, c.value}
+		}
+		r, _ := newFakeRedis(t, "cluster", "hash", props...)
+		cc := r.client.(*goredis.ClusterClient)
+		if got := cc.Options().ReadTimeout; got != c.cluster {
+			t.Errorf("read_timeout=%q: the cluster's (pipelines') read timeout %v, want %v", c.value, got, c.cluster)
+		}
+		var shards atomic.Int32 // ForEachShard calls fn concurrently
+		err := cc.ForEachShard(context.Background(), func(_ context.Context, node *goredis.Client) error {
+			shards.Add(1)
+			if o := node.Options(); o.ReadTimeout != c.read || o.WriteTimeout != c.write {
+				t.Errorf("read_timeout=%q: node %s read/write timeouts %v/%v, want %v/%v",
+					c.value, o.Addr, o.ReadTimeout, o.WriteTimeout, c.read, c.write)
+			}
+			return nil
+		})
+		if err != nil || shards.Load() == 0 {
+			t.Fatalf("read_timeout=%q: %d nodes, %v", c.value, shards.Load(), err)
 		}
 	}
 }

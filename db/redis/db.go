@@ -368,6 +368,7 @@ const (
 	// go-redis v9.8.0's defaults
 	redisMinRetryBackoffDefault            = 8 * time.Millisecond
 	redisMaxRetryBackoffDefault            = 512 * time.Millisecond
+	redisReadTimeoutDefault                = 3 * time.Second
 	redisClusterStateReloadInterval        = "redis.cluster_state_reload_interval"
 	redisClusterStateReloadIntervalDefault = 10 * time.Second
 )
@@ -557,6 +558,17 @@ func retryBackoffs(r *propReader) (time.Duration, time.Duration) {
 	return minBackoff, maxBackoff
 }
 
+// newClusterNodeClient makes a cluster node's client as go-redis does, but a
+// node read timeout of 0, which a cluster read timeout of -1 gives the nodes
+// (the cluster's pipelines then have no deadline), is v9.8.0's 3 s for the
+// commands sent on their own, not v9.22.0's 5 s.
+func newClusterNodeClient(opt *goredis.Options) *goredis.Client {
+	if opt.ReadTimeout == 0 {
+		opt.ReadTimeout = redisReadTimeoutDefault
+	}
+	return goredis.NewClient(opt)
+}
+
 func getOptionsSingle(p *properties.Properties) (*goredis.Options, error) {
 	opts := &goredis.Options{}
 	r := &propReader{p: p}
@@ -569,7 +581,7 @@ func getOptionsSingle(p *properties.Properties) (*goredis.Options, error) {
 	opts.MaxRetries = r.retries(redisMaxRetries)
 	opts.MinRetryBackoff, opts.MaxRetryBackoff = retryBackoffs(r)
 	opts.DialTimeout = r.duration(redisDialTimeout, time.Second*5)
-	opts.ReadTimeout = r.duration(redisReadTimeout, time.Second*3)
+	opts.ReadTimeout = r.duration(redisReadTimeout, redisReadTimeoutDefault)
 	opts.WriteTimeout = r.duration(redisWriteTimeout, opts.ReadTimeout)
 	opts.PoolSize = r.int(redisPoolSize, redisPoolSizeDefault)
 	if opts.PoolSize < 0 {
@@ -593,6 +605,11 @@ func getOptionsSingle(p *properties.Properties) (*goredis.Options, error) {
 	// are busy before returning an error.
 	// Default is ReadTimeout + 1 second.
 	opts.PoolTimeout = r.duration(redisPoolTimeout, time.Second+opts.ReadTimeout)
+	// an explicit 0 means go-redis's default read timeout: v9.8.0's 3 s, not
+	// v9.22.0's 5 s (after the pool timeout, which v9.8.0 took from the 0)
+	if opts.ReadTimeout == 0 {
+		opts.ReadTimeout = redisReadTimeoutDefault
+	}
 	// Since go-redis 9.0.0 the MaxConnAge option was Renamed to ConnMaxLifetime
 	// Expired connections may be closed lazily before reuse.
 	// If d <= 0, connections are not closed due to a connection's idle time.
@@ -637,7 +654,7 @@ func getOptionsCluster(p *properties.Properties) (*goredis.ClusterOptions, error
 	opts.MaxRetries = r.retries(redisMaxRetries)
 	opts.MinRetryBackoff, opts.MaxRetryBackoff = retryBackoffs(r)
 	opts.DialTimeout = r.duration(redisDialTimeout, time.Second*5)
-	opts.ReadTimeout = r.duration(redisReadTimeout, time.Second*3)
+	opts.ReadTimeout = r.duration(redisReadTimeout, redisReadTimeoutDefault)
 	opts.WriteTimeout = r.duration(redisWriteTimeout, opts.ReadTimeout)
 	opts.PoolSize = r.int(redisPoolSize, redisPoolSizeDefault)
 	if opts.PoolSize < 0 {
@@ -661,6 +678,11 @@ func getOptionsCluster(p *properties.Properties) (*goredis.ClusterOptions, error
 	// are busy before returning an error.
 	// Default is ReadTimeout + 1 second.
 	opts.PoolTimeout = r.duration(redisPoolTimeout, time.Second+opts.ReadTimeout)
+	// an explicit 0 means go-redis's default read timeout: v9.8.0's 3 s, not
+	// v9.22.0's 5 s (after the pool timeout, which v9.8.0 took from the 0)
+	if opts.ReadTimeout == 0 {
+		opts.ReadTimeout = redisReadTimeoutDefault
+	}
 	// Since go-redis 9.0.0 the MaxConnAge option was Renamed to ConnMaxLifetime
 	// Expired connections may be closed lazily before reuse.
 	// If d <= 0, connections are not closed due to a connection's idle time.
@@ -684,6 +706,7 @@ func getOptionsCluster(p *properties.Properties) (*goredis.ClusterOptions, error
 	opts.ReadBufferSize, opts.WriteBufferSize = b.readBufferSize, b.writeBufferSize
 	opts.DialerRetries, opts.MaxConcurrentDials = b.dialerRetries, b.maxConcurrentDials
 	opts.DisableRoutingPolicies = !b.routingPolicies
+	opts.NewClient = newClusterNodeClient
 	// go-redis v9.8.0 reloaded the slots every 10 s; v9.22.0's default is 60 s
 	if opts.ClusterStateReloadInterval, err = getDuration(p, redisClusterStateReloadInterval, redisClusterStateReloadIntervalDefault); err != nil {
 		return nil, err
