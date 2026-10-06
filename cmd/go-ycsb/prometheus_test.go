@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -91,8 +92,18 @@ func fakeMetric(t *testing.T, body, name, op string) int64 {
 }
 
 func TestPrometheusFakeCommandCountsMatchSummary(t *testing.T) {
-	// This package's other tests never initialise measurement. Keep this test
-	// serial: Output closes the process-wide measurement channel once.
+	// The command owns process-wide DB registration and measurement shutdown.
+	// Run each invocation in a fresh process so -count can repeat this test.
+	if os.Getenv("GO_YCSB_PROMETHEUS_FAKE_CHILD") != "1" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPrometheusFakeCommandCountsMatchSummary$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "GO_YCSB_PROMETHEUS_FAKE_CHILD=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fake command subprocess: %v\n%s", err, output)
+		}
+		return
+	}
 	db := &prometheusFakeDB{started: make(chan struct{}), release: make(chan struct{})}
 	ycsb.RegisterDBCreator("prometheus-fake", prometheusFakeCreator{db})
 	output := t.TempDir() + "/summary.json"
