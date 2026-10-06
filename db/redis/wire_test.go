@@ -264,10 +264,10 @@ func TestStopGraceBoundsTheWait(t *testing.T) {
 		run, stop := context.WithCancel(context.Background())
 		ctx := r.InitThread(run, 0, 1)
 		var stopAt time.Time
-		go func() { time.Sleep(100 * time.Millisecond); stopAt = time.Now(); stop() }()
+		go func() { time.Sleep(stopAfter); stopAt = time.Now(); stop() }()
 		err := r.BatchInsert(ctx, "usertable", keys, values)
 		ended := time.Now()
-		if after := ended.Sub(stopAt); after < stopGrace-50*time.Millisecond || after > stopGrace+400*time.Millisecond {
+		if after := ended.Sub(stopAt); after < stopGrace-50*time.Millisecond || after > stopGrace+pastTheGrace {
 			t.Errorf("read_timeout %s: the batch ended %v after the stop, want the %v grace", readTimeout, after, stopGrace)
 		}
 		var be *ycsb.BatchError
@@ -369,7 +369,10 @@ func TestStopClose(t *testing.T) {
 	stopGrace = 100 * time.Millisecond
 	t.Cleanup(func() { stopGrace = orig })
 
-	// stop, then the grace closes the client, once, for every thread
+	// stop, then the grace closes the client, once, for every thread (a
+	// longer grace here, so that a slow runner can't pass its end before the
+	// check that it hasn't come yet)
+	stopGrace = time.Second
 	r, _ := newFakeRedis(t, "single", HASH_DATATYPE)
 	run, stop := context.WithCancel(context.Background())
 	var ctx context.Context
@@ -377,12 +380,11 @@ func TestStopClose(t *testing.T) {
 		ctx = r.InitThread(run, i, 50)
 	}
 	stop()
-	time.Sleep(stopGrace / 2)
+	time.Sleep(stopGrace / 10)
 	if clientClosed(r) {
 		t.Fatal("closed before the grace ended")
 	}
-	time.Sleep(stopGrace)
-	if !graceEnded(r, ctx) {
+	if !eventually(5*time.Second, func() bool { return graceEnded(r, ctx) }) {
 		t.Fatal("the grace didn't close the client")
 	}
 	if err := r.Close(); err != nil {
@@ -390,6 +392,7 @@ func TestStopClose(t *testing.T) {
 	}
 
 	// stop, then the run's own Close before the grace ends: nothing later
+	stopGrace = 100 * time.Millisecond
 	r, _ = newFakeRedis(t, "single", HASH_DATATYPE)
 	run, stop = context.WithCancel(context.Background())
 	ctx = r.InitThread(run, 0, 1)
@@ -397,7 +400,7 @@ func TestStopClose(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(2 * stopGrace)
+	time.Sleep(3 * stopGrace)
 	if graceEnded(r, ctx) {
 		t.Fatal("the grace's close ran after Close disarmed it")
 	}
@@ -407,8 +410,7 @@ func TestStopClose(t *testing.T) {
 	stopped, cancel := context.WithCancel(context.Background())
 	cancel()
 	ctx = r.InitThread(stopped, 0, 1)
-	time.Sleep(2 * stopGrace)
-	if !graceEnded(r, ctx) {
+	if !eventually(5*time.Second, func() bool { return graceEnded(r, ctx) }) {
 		t.Fatal("a stop before InitThread armed no close")
 	}
 }
@@ -473,12 +475,12 @@ func TestStopWithASlowNode(t *testing.T) {
 	keys, values := testRecords(60)
 	r, nodes := newFakeRedis(t, "cluster", HASH_DATATYPE)
 	nodes.mu.Lock()
-	nodes.delay = map[string]time.Duration{clusterSlots[1].Nodes[0].Addr: 15 * time.Millisecond} // per record: some 300 ms per batch
+	nodes.delay = map[string]time.Duration{clusterSlots[1].Nodes[0].Addr: 50 * time.Millisecond} // per record: some 1 s per batch
 	nodes.mu.Unlock()
 	run, stop := context.WithCancel(context.Background())
 	ctx := r.InitThread(run, 0, 1)
 	defer r.CleanupThread(ctx)
-	go func() { time.Sleep(100 * time.Millisecond); stop() }()
+	go func() { time.Sleep(stopAfter); stop() }()
 	if err := r.BatchInsert(ctx, "usertable", keys, values); err != nil {
 		t.Fatalf("BatchInsert = %v, want every record in", err)
 	}
@@ -627,7 +629,7 @@ func TestStopGraceSingleMode(t *testing.T) {
 		nodes.mu.Unlock()
 		run, stop := context.WithCancel(context.Background())
 		ctx := r.InitThread(run, 0, 1)
-		go func() { time.Sleep(100 * time.Millisecond); stop() }()
+		go func() { time.Sleep(stopAfter); stop() }()
 		begin := time.Now()
 		var errs []error
 		if batched {
@@ -640,8 +642,8 @@ func TestStopGraceSingleMode(t *testing.T) {
 		} else {
 			errs = []error{r.Insert(ctx, "usertable", keys[0], values[0])}
 		}
-		if took := time.Since(begin); took > stopGrace+time.Second {
-			t.Errorf("batched=%v: took %v, want about the 100 ms + %v grace", batched, took, stopGrace)
+		if took := time.Since(begin); took > stopAfter+stopGrace+pastTheGrace {
+			t.Errorf("batched=%v: took %v, want about the %v + %v grace", batched, took, stopAfter, stopGrace)
 		}
 		for i, err := range errs {
 			if err == nil || errors.Is(err, context.Canceled) {

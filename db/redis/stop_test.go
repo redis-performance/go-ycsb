@@ -28,8 +28,25 @@ import (
 // also a retry's back-off, a pool turn or a dial, which go-redis waits for on
 // the operation's context, not on the client. Otherwise the run can pass
 // go-ycsb's force-exit, 10 s after the stop, without its summary. Each test
-// allows the grace plus 500 ms.
-const pastTheGrace = 500 * time.Millisecond
+// allows the grace plus 2 s, for a slow shared runner under -race: what they
+// end would otherwise run for 30 s (a read or dial timeout) or more.
+const pastTheGrace = 2 * time.Second
+
+// stopAfter is how long a test lets an operation get sent before it stops
+// the run.
+const stopAfter = 300 * time.Millisecond
+
+// eventually polls cond for up to within.
+func eventually(within time.Duration, cond func() bool) bool {
+	for deadline := time.Now().Add(within); ; time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+	}
+}
 
 // clientClosed says whether r's client is closed.
 func clientClosed(r *redis) bool {
@@ -39,7 +56,7 @@ func clientClosed(r *redis) bool {
 // graceEnded says whether the end of the grace of ctx's run (ctx is a
 // thread's context) closed the client and canceled the run's operations'
 // context (closeToCancel after the close), waiting for the cancel up to
-// closeToCancel and a bit.
+// closeToCancel and a second.
 func graceEnded(r *redis, ctx context.Context) bool {
 	s := ctx.Value(threadKey{}).(*thread).run
 	if !clientClosed(r) {
@@ -48,7 +65,7 @@ func graceEnded(r *redis, ctx context.Context) bool {
 	select {
 	case <-s.done.Done():
 		return true
-	case <-time.After(closeToCancel + 200*time.Millisecond):
+	case <-time.After(closeToCancel + time.Second):
 		return false
 	}
 }
@@ -94,11 +111,11 @@ func TestStopEndsRetriesAndPoolWaitsAtTheGrace(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			time.Sleep(30 * time.Millisecond) // after the other took the connection
+			time.Sleep(stopAfter / 3) // after the other took the connection
 			errWaiting = r.Insert(waiting, "usertable", keyOn("b", slow), values[0])
 			endWaiting = time.Now()
 		}()
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(stopAfter)
 		closeAt := time.Now().Add(stopGrace)
 		stop()
 		wg.Wait()
@@ -121,7 +138,7 @@ func TestStopEndsADialAtTheGrace(t *testing.T) {
 	withGrace(t, 300*time.Millisecond)
 	p := properties.NewProperties()
 	p.Set("threadcount", "1")
-	p.Set(redisDialTimeout, "3s")
+	p.Set(redisDialTimeout, "30s")
 	opts, err := getOptionsSingle(p)
 	if err != nil {
 		t.Fatal(err)
@@ -136,10 +153,10 @@ func TestStopEndsADialAtTheGrace(t *testing.T) {
 	keys, values := testRecords(1)
 	run, stop := context.WithCancel(context.Background())
 	ctx := r.InitThread(run, 0, 1)
-	go func() { time.Sleep(100 * time.Millisecond); stop() }()
+	go func() { time.Sleep(stopAfter); stop() }()
 	begin := time.Now()
 	err = r.Insert(ctx, "usertable", keys[0], values[0])
-	over := time.Since(begin) - 100*time.Millisecond - stopGrace
+	over := time.Since(begin) - stopAfter - stopGrace
 	t.Logf("a dial in progress ended %v after the close: %v", over, err)
 	if over > pastTheGrace {
 		t.Errorf("a dial in progress ran %v past the grace", over)
@@ -153,15 +170,15 @@ func TestStopEndsABackoffAtTheGrace(t *testing.T) {
 	withGrace(t, 300*time.Millisecond)
 	slow := clusterSlots[1].Nodes[0].Addr
 	r, nodes := newFakeRedis(t, "cluster", HASH_DATATYPE, redisMaxRedirects, "3",
-		redisMinRetryBackoff, "3s", redisMaxRetryBackoff, "3s")
+		redisMinRetryBackoff, "30s", redisMaxRetryBackoff, "30s")
 	nodes.drop = func(addr string, _ []string) bool { return addr == slow }
 	_, values := testRecords(1)
 	run, stop := context.WithCancel(context.Background())
 	ctx := r.InitThread(run, 0, 1)
-	go func() { time.Sleep(100 * time.Millisecond); stop() }()
+	go func() { time.Sleep(stopAfter); stop() }()
 	begin := time.Now()
 	err := r.Insert(ctx, "usertable", keyOn("k", slow), values[0])
-	over := time.Since(begin) - 100*time.Millisecond - stopGrace
+	over := time.Since(begin) - stopAfter - stopGrace
 	t.Logf("an operation backing off ended %v after the close: %v", over, err)
 	if over > pastTheGrace {
 		t.Errorf("an operation backing off ran %v past the grace", over)
@@ -192,8 +209,7 @@ func TestReuseAcrossRuns(t *testing.T) {
 		t.Fatalf("run 2, still running after run 1's grace: %v", err)
 	}
 	stop2()
-	time.Sleep(3 * stopGrace)
-	if !clientClosed(r) {
+	if !eventually(5*time.Second, func() bool { return clientClosed(r) }) {
 		t.Error("run 2's stop didn't close the client at the end of its grace")
 	}
 }
@@ -231,9 +247,9 @@ func TestGraceTakenAtTheRunsStart(t *testing.T) {
 	ctx := r.InitThread(run, 0, 1)
 	stopGrace = 5 * time.Second
 	stop()
-	time.Sleep(400 * time.Millisecond)
-	if !graceEnded(r, ctx) {
-		t.Fatal("the grace taken at the run's start (100 ms) didn't end in 600 ms")
+	// the 5 s grace would end well after eventually gives up
+	if !eventually(2500*time.Millisecond, func() bool { return graceEnded(r, ctx) }) {
+		t.Fatal("the grace taken at the run's start (100 ms) didn't end in 2.5 s")
 	}
 }
 
@@ -288,52 +304,88 @@ func TestStartedAllocatesNothing(t *testing.T) {
 
 // Threads of several runs on one instance (an embedder), started
 // interleaved, and threads whose contexts are their own children of one run:
-// each run's stop ends that run's operations at its grace, whatever the
-// others do.
+// a run's stop is hooked whatever the others' threads, and ends its
+// operations at its grace. Each case on an instance of its own: the first
+// grace closes the shared client for every run on it (see
+// TestStopEndsEveryRunOnTheInstance).
 func TestRunsInterleavedOnOneInstance(t *testing.T) {
 	withGrace(t, 200*time.Millisecond)
-	p := properties.NewProperties()
-	p.Set("threadcount", "4")
-	p.Set(redisDialTimeout, "3s")
-	opts, err := getOptionsSingle(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts.Addr = singleAddr
-	opts.Dialer = func(ctx context.Context, _, _ string) (net.Conn, error) {
-		<-ctx.Done() // no SYN-ACK: every operation waits on a dial
-		return nil, ctx.Err()
-	}
-	r := &redis{client: goredis.NewClient(opts), mode: "single", datatype: HASH_DATATYPE, fieldcount: 3}
-	t.Cleanup(func() { r.Close() })
 	keys, values := testRecords(1)
+	for _, target := range []string{"B, started between A's threads", "C1, a child of run C"} {
+		p := properties.NewProperties()
+		p.Set("threadcount", "4")
+		p.Set(redisDialTimeout, "30s")
+		opts, err := getOptionsSingle(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts.Addr = singleAddr
+		opts.Dialer = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done() // no SYN-ACK: every operation waits on a dial
+			return nil, ctx.Err()
+		}
+		r := &redis{client: goredis.NewClient(opts), mode: "single", datatype: HASH_DATATYPE, fieldcount: 3}
 
+		runA, stopA := context.WithCancel(context.Background())
+		defer stopA()
+		runB, stopB := context.WithCancel(context.Background())
+		defer stopB()
+		threadA1 := r.InitThread(runA, 0, 2)
+		threadB := r.InitThread(runB, 0, 1)
+		threadA2 := r.InitThread(runA, 1, 2) // A, B, A
+		// a run whose threads each get a child context of it
+		runC, stopC := context.WithCancel(context.Background())
+		defer stopC()
+		childC1, cancelC1 := context.WithCancel(runC)
+		childC2, cancelC2 := context.WithCancel(runC)
+		threadC1, threadC2 := r.InitThread(childC1, 0, 2), r.InitThread(childC2, 1, 2)
+
+		ctx, stop := threadB, stopB
+		if target != "B, started between A's threads" {
+			ctx, stop = threadC1, stopC
+		}
+		begin := time.Now()
+		go func() { time.Sleep(stopAfter); stop() }()
+		err = r.Insert(ctx, "usertable", keys[0], values[0])
+		if over := time.Since(begin) - stopAfter - stopGrace; over > pastTheGrace {
+			t.Errorf("%s: its operation ran %v past its run's grace (%v)", target, over, err)
+		}
+		if err == nil {
+			t.Errorf("%s: the operation the grace ended succeeded", target)
+		}
+		_, _, _ = threadA1, threadA2, threadC2
+		stopA()
+		cancelC1()
+		cancelC2()
+		r.Close()
+	}
+}
+
+// The deliberate limit: every run on an instance shares its client, so the
+// end of one run's grace closes it for all of them. Run A, never stopped,
+// works until run B's grace ends, and then fails ("redis: client is closed").
+func TestStopEndsEveryRunOnTheInstance(t *testing.T) {
+	withGrace(t, 100*time.Millisecond)
+	r, _ := newFakeRedis(t, "single", HASH_DATATYPE)
+	keys, values := testRecords(1)
 	runA, stopA := context.WithCancel(context.Background())
 	defer stopA()
 	runB, stopB := context.WithCancel(context.Background())
-	threadA1 := r.InitThread(runA, 0, 2)
-	threadB := r.InitThread(runB, 0, 1)
-	threadA2 := r.InitThread(runA, 1, 2) // A, B, A
-	// a run whose threads each get a child context of it
-	runC, stopC := context.WithCancel(context.Background())
-	childC1, cancelC1 := context.WithCancel(runC)
-	defer cancelC1()
-	childC2, cancelC2 := context.WithCancel(runC)
-	defer cancelC2()
-	threadC1, threadC2 := r.InitThread(childC1, 0, 2), r.InitThread(childC2, 1, 2)
-
-	for name, c := range map[string]struct {
-		ctx  context.Context
-		stop func()
-	}{"B, started between A's threads": {threadB, stopB}, "C1, a child of run C": {threadC1, stopC}} {
-		begin := time.Now()
-		go func(stop func()) { time.Sleep(100 * time.Millisecond); stop() }(c.stop)
-		err := r.Insert(c.ctx, "usertable", keys[0], values[0])
-		if over := time.Since(begin) - 100*time.Millisecond - stopGrace; over > pastTheGrace {
-			t.Errorf("%s: its operation ran %v past its run's grace (%v)", name, over, err)
-		}
+	threadA, threadB := r.InitThread(runA, 0, 1), r.InitThread(runB, 0, 1)
+	defer r.CleanupThread(threadA)
+	if err := r.Insert(threadA, "usertable", keys[0], values[0]); err != nil {
+		t.Fatalf("run A before B's stop: %v", err)
 	}
-	_, _, _ = threadA1, threadA2, threadC2
+	stopB()
+	if !eventually(5*time.Second, func() bool { return graceEnded(r, threadB) }) {
+		t.Fatal("run B's grace didn't end")
+	}
+	if err := r.Insert(threadA, "usertable", keys[0], values[0]); !errors.Is(err, goredis.ErrClosed) {
+		t.Fatalf("run A after B's grace: %v, want %v", err, goredis.ErrClosed)
+	}
+	if err := runA.Err(); err != nil {
+		t.Fatalf("run A was stopped: %v", err)
+	}
 }
 
 // slowCloseClient's Close blocks, as go-redis's can (it waits for its
@@ -343,7 +395,7 @@ type slowCloseClient struct {
 }
 
 func (c slowCloseClient) Close() error {
-	time.Sleep(2 * time.Second)
+	time.Sleep(10 * time.Second)
 	return c.Client.Close()
 }
 
@@ -362,7 +414,7 @@ func TestCancelDoesNotWaitForClose(t *testing.T) {
 		if took := time.Since(begin); took > stopGrace+closeToCancel+pastTheGrace {
 			t.Errorf("the operations' context was canceled %v after the stop, want about %v", took, stopGrace+closeToCancel)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(8 * time.Second):
 		t.Fatal("the operations' context waited for the blocking Close")
 	}
 }
