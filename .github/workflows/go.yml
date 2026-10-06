@@ -8,6 +8,22 @@ on:
 
 jobs:
 
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Test measurement, client, and command
+        run: go test -race ./pkg/measurement ./pkg/client ./cmd/go-ycsb
+
   build:
     runs-on: ubuntu-latest
     permissions:
