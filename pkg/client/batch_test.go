@@ -652,6 +652,10 @@ func TestStopRule(t *testing.T) {
 		{"wrapped", fmt.Errorf("pipeline: %w", context.Canceled), map[string]int64{"INSERT_ERROR": 3, "BATCH_INSERT": 1}},
 		{"some", &ycsb.BatchError{Errs: []error{nil, context.Canceled, errors.New("OOM")}},
 			map[string]int64{"INSERT": 1, "TOTAL": 1, "INSERT_ERROR": 2, "BATCH_INSERT": 1}},
+		// a record the DB didn't run (the stop came before it) counts as
+		// nothing; the batch, sent, counts once
+		{"some not run", &ycsb.BatchError{Errs: []error{nil, fmt.Errorf("%w: %w", ycsb.ErrNotRun, context.Canceled), nil}},
+			map[string]int64{"INSERT": 2, "TOTAL": 2, "BATCH_INSERT": 1}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			samples := recordSamples(t)
