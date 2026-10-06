@@ -3,11 +3,29 @@
 # Shared helpers for the redis integration tests: disposable single Redis and
 # Redis Cluster containers, under names unique to the run. Sourced, not run.
 #
-# Callers set REDIS_IMAGE and SUFFIX (unique per run), call redis_start_single
-# and/or redis_start_cluster, and redis_cleanup on exit. redis_start_cluster
-# needs python3 (free_ports): callers check for it, and skip without it.
+# Callers call redis_require_tools first, set REDIS_IMAGE, call
+# redis_start_single and/or redis_start_cluster, and redis_cleanup on exit.
 
 REDIS_CONTAINERS=()
+
+# redis_require_tools: docker, and python3 (free_ports, the callers' own
+# checks). Without them a local run skips; in CI ($CI set) it fails, so that a
+# runner without them can't pass a job that tested nothing.
+redis_require_tools() {
+  local missing=
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    missing="docker"
+  elif ! command -v python3 >/dev/null 2>&1; then
+    missing="python3"
+  fi
+  [ -z "$missing" ] && return 0
+  if [ -n "${CI:-}" ]; then
+    echo "FAIL: $missing is not available (CI is set: this job must run the test)" >&2
+    exit 1
+  fi
+  echo "SKIP: $missing is not available"
+  exit 0
+}
 
 redis_cleanup() {
   if [ ${#REDIS_CONTAINERS[@]} -gt 0 ]; then
