@@ -186,6 +186,41 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
 |measurement.output_file|""|File to write output to, default writes to stdout|
 |measurement.interval|10s|How often the status lines (and interval records) are written: a Go duration such as `1s` or `500ms`, or a number of seconds; at least `100ms`. `--interval <seconds>` sets it too, in whole seconds only, and wins over `-p measurement.interval` when both are given: for a sub-second interval use `-p measurement.interval` alone|
 |measurement.interval_output_file|""|With `measurementtype=histogram`: a file that gets one JSON line per operation per interval, with that interval's own latency percentiles (the status lines' percentiles are cumulative since the start)|
+|measurement.prometheus_listen|""|Serve `/metrics` at this address for `measurementtype=histogram`; empty disables the exporter. Bind to loopback or a private network: the endpoint has no authentication|
+|measurement.prometheus_labels|""|Comma-separated constant labels (`k=v`) on every exported metric, for example `phase=load`; names and values are validated|
+|measurement.prometheus_linger|1s|How long to serve final counts after the command finishes, as a non-negative Go duration|
+
+### Prometheus exporter
+
+The opt-in exporter serves live counters and the last completed interval's latency measurements. For example,
+`-p measurement.prometheus_listen=127.0.0.1:9464 -p measurement.prometheus_labels=phase=run -p measurement.interval=1s -p debug.pprof=127.0.0.1:6060`
+uses one-second windows. Set the Prometheus or Alloy scrape interval to one second or less for the best window
+coverage, and use its `remote_write` to retain the series in a long-term metrics store. The endpoint holds only the
+latest window: slower scrapes skip windows, and scrape timing can skip or repeat one even at equal cadence. Use
+`measurement.interval_output_file` when every window must be retained. Set `measurement.prometheus_linger` to at
+least the scrape interval so the final counts have a chance to be scraped (the default 1s is for a 1s scrape).
+A scrape can still miss the last partial window; the final summary remains the complete record. A busy or invalid
+listen address fails at startup.
+The exporter uses a private HTTP mux; the existing pprof server is separate and defaults to `:6060` on all interfaces,
+so bind it to loopback or another private address too.
+
+| metric | meaning |
+|---|---|
+| `ycsb_info{workload,command,threadcount,batch_size,target,version}` | process configuration; value 1 |
+| `ycsb_phase_running` | 1 from the start of `Client.Run`, 0 after final counts are drained and printed |
+| `ycsb_operations_total{op}`, `ycsb_errors_total{op}` | cumulative counts from the same histograms as the final summary; batches and failed records follow the Counting rules above |
+| `ycsb_interval_latency_seconds{op,quantile}` | p50, p90, p95, p99 and p99.9 of the last completed interval, in seconds |
+| `ycsb_interval_latency_avg_seconds{op}`, `ycsb_interval_latency_max_seconds{op}` | mean and max latency of that interval, in seconds |
+| `ycsb_interval_operations{op}` | samples in that interval |
+| `ycsb_interval_window_seconds`, `ycsb_interval_end_timestamp_seconds` | length and end time of that interval |
+
+Interval series appear after the first interval ends, and an operation's interval series are omitted when it had no
+samples in that window. Latency quantiles are gauges for one window, not Prometheus summaries: don't apply `rate()`
+to them. Counters are live and may differ briefly across operations during a scrape; once `ycsb_phase_running` is
+zero, they match the final summary. External run labels belong in the scraper, not in go-ycsb. Enabling the exporter
+keeps per-interval histograms even without an interval file, so the single measurement goroutine pays the same
+window recording and cut cost as `measurement.interval_output_file`; the worker hot path is unchanged. No existing
+output changes when the exporter is off.
 
 Each line of `measurement.interval_output_file` describes one operation over one interval, e.g.:
 
@@ -199,7 +234,7 @@ Each line of `measurement.interval_output_file` describes one operation over one
 - A sample belongs to the interval in which the single measurement goroutine records it, not the one in which the operation ended. That is within microseconds while the goroutine keeps up. If it falls behind (client threads produce samples faster than it records them, which shows as the measure channel filling up), its backlog is recorded late: interval rates and percentiles shift towards later intervals, and at the end of the run the backlog drains into the last interval, whose rate can then exceed anything the database served. Treat a last interval with an implausible `ops` as a saturated client, not as a database result.
 - All operations' intervals end at the same instant. `TOTAL` counts the successful operations, so in each interval it matches their sum up to the operation/`TOTAL` pairs a cut falls between (at most one per client thread, each of up to `batch.size` records), and exactly over the run. Three exceptions: `READ_MODIFY_WRITE` records no `TOTAL` sample of its own (its inner `READ` and `UPDATE` do), nor does a `BATCH_<OP>` (its records count as `<OP>`), and with `warmuptime` set a thread can record `TOTAL` for an operation the warm-up dropped.
 - The file is created (truncated) at start by both `load` and `run`, so with the property in a shared workload file `run` replaces what `load` wrote; give each command its own path (`-p measurement.interval_output_file=...`) to keep both.
-- Without `measurement.interval_output_file` no per-interval histograms are kept. Recording a sample now takes a lock (the fix for a data race between recording and reporting), about 11 ns more per sample, uncontended: one goroutine records, the reporter takes it once per interval.
+- Without `measurement.interval_output_file` or the Prometheus exporter, no per-interval histograms are kept. Recording a sample now takes a lock (the fix for a data race between recording and reporting), about 11 ns more per sample, uncontended: one goroutine records, the reporter takes it once per interval.
 
 ## Database Configuration
 
