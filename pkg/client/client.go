@@ -94,6 +94,16 @@ func newWorker(p *properties.Properties, threadID int, threadCount int, workload
 	return w
 }
 
+// nextBatchSize is batch.size, or what is left of the thread's operations
+// if that is less: the last batch must not run past them (for a load, past
+// insertstart+insertcount).
+func (w *worker) nextBatchSize() int {
+	if w.opCount > 0 && w.opCount-w.opsDone < int64(w.batchSize) {
+		return int(w.opCount - w.opsDone)
+	}
+	return w.batchSize
+}
+
 func (w *worker) throttle(ctx context.Context, startTime time.Time) {
 	if w.targetOpsPerMs <= 0 {
 		return
@@ -110,10 +120,26 @@ func (w *worker) throttle(ctx context.Context, startTime time.Time) {
 	}
 }
 
+// spreadDraw draws a thread's start-up offset in [0, n) ns (a variable for
+// the tests).
+var spreadDraw = rand.Int63n
+
 func (w *worker) run(ctx context.Context) {
-	// spread the thread operation out so they don't all hit the DB at the same time
-	if w.targetOpsPerMs > 0.0 && w.targetOpsPerMs <= 1.0 {
-		time.Sleep(time.Duration(rand.Int63n(w.targetOpsTickNs)))
+	// spread the thread operation out so they don't all hit the DB at the same time:
+	// over one batch's worth of ticks with batches, which otherwise all
+	// threads would send at once, then idle
+	if w.targetOpsPerMs > 0.0 && (w.targetOpsPerMs <= 1.0 || w.doBatch) {
+		spread := w.targetOpsTickNs
+		if w.doBatch {
+			spread *= int64(w.batchSize)
+		}
+		if spread > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(spreadDraw(spread))):
+			}
+		}
 	}
 
 	startTime := time.Now()
@@ -121,17 +147,23 @@ func (w *worker) run(ctx context.Context) {
 	for w.opCount == 0 || w.opsDone < w.opCount {
 		var err error
 		opsCount := 1
+		// A batch is in the warm-up or not as a whole, as decided here: its
+		// records are measured and counted together (see batchMeasured), even
+		// when the warm-up ends while it runs.
+		var measured bool
+		if w.doBatch {
+			opsCount = w.nextBatchSize()
+			measured = measurement.IsWarmUpFinished()
+		}
 		if w.doTransactions {
 			if w.doBatch {
-				err = w.workload.DoBatchTransaction(ctx, w.batchSize, w.workDB)
-				opsCount = w.batchSize
+				err = w.workload.DoBatchTransaction(withBatchMeasured(ctx, measured), opsCount, w.workDB)
 			} else {
 				err = w.workload.DoTransaction(ctx, w.workDB)
 			}
 		} else {
 			if w.doBatch {
-				err = w.workload.DoBatchInsert(ctx, w.batchSize, w.workDB)
-				opsCount = w.batchSize
+				err = w.workload.DoBatchInsert(withBatchMeasured(ctx, measured), opsCount, w.workDB)
 			} else {
 				err = w.workload.DoInsert(ctx, w.workDB)
 			}
@@ -141,7 +173,10 @@ func (w *worker) run(ctx context.Context) {
 			fmt.Printf("operation err: %v\n", err)
 		}
 
-		if measurement.IsWarmUpFinished() {
+		if !w.doBatch {
+			measured = measurement.IsWarmUpFinished()
+		}
+		if measured {
 			w.opsDone += int64(opsCount)
 			w.throttle(ctx, startTime)
 		}

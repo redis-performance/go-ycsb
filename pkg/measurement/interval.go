@@ -112,7 +112,8 @@ func (h *histograms) cutInterval(now time.Time) []IntervalRecord {
 // run is still in warm-up, or ended in it) there is no interval, so it cuts
 // nothing. Every operation's window is taken first, with recording held off (histograms.cut), and only then
 // summarised, so the windows end at the same instant: TOTAL matches the sum of
-// the other operations up to an operation whose TOTAL falls in the next interval.
+// the other operations up to an operation whose TOTAL falls in the next interval
+// (per client thread one sample: one record, or a batch's batch.size records).
 func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
 	if !h.windows || h.iv.start.IsZero() {
 		return nil

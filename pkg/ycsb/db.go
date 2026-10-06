@@ -15,6 +15,7 @@ package ycsb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/magiconair/properties"
@@ -70,12 +71,23 @@ type DB interface {
 	Delete(ctx context.Context, table string, key string) error
 }
 
-type BatchDB interface {
+// BatchInserter is the part of BatchDB a load needs: a DB can implement it
+// alone to batch inserts while its reads, updates and deletes stay per record.
+type BatchInserter interface {
 	// BatchInsert inserts batch records in the database.
 	// table: The name of the table.
 	// keys: The keys of batch records.
 	// values: The values of batch records.
+	// The records may succeed or fail independently: return a *BatchError
+	// then, so that only the failed ones are counted as failed (and retried).
 	BatchInsert(ctx context.Context, table string, keys []string, values []map[string][]byte) error
+}
+
+// BatchDB batches every operation. Like BatchInsert, BatchRead, BatchUpdate
+// and BatchDelete may return a *BatchError, so that only the failed records
+// count as failed.
+type BatchDB interface {
+	BatchInserter
 
 	// BatchRead reads records from the database.
 	// table: The name of the table.
@@ -93,6 +105,60 @@ type BatchDB interface {
 	// table: The name of the table.
 	// keys: The keys of the records to delete.
 	BatchDelete(ctx context.Context, table string, keys []string) error
+}
+
+// ErrNotRun is (wrapped in) the error of an operation the client didn't hand
+// to the DB because the run had stopped: it counts as nothing.
+var ErrNotRun = errors.New("not run: the run stopped")
+
+// BatchError is the error of a batch operation whose records failed
+// independently: Errs[i] is the error of the batch's i-th record, nil if that
+// record succeeded. Any other error from a batch operation means that every
+// record of the batch failed.
+type BatchError struct {
+	Errs []error
+}
+
+// NewBatchError returns a *BatchError of the per-record errors errs, or nil if
+// every record succeeded.
+func NewBatchError(errs []error) error {
+	for _, err := range errs {
+		if err != nil {
+			return &BatchError{Errs: errs}
+		}
+	}
+	return nil
+}
+
+// Failed returns the number of failed records.
+func (e *BatchError) Failed() int {
+	n := 0
+	for _, err := range e.Errs {
+		if err != nil {
+			n++
+		}
+	}
+	return n
+}
+
+func (e *BatchError) Error() string {
+	for _, err := range e.Errs {
+		if err != nil {
+			return fmt.Sprintf("%d of %d records failed, the first: %v", e.Failed(), len(e.Errs), err)
+		}
+	}
+	return fmt.Sprintf("0 of %d records failed", len(e.Errs))
+}
+
+// Unwrap makes errors.Is and errors.As look at every record's error.
+func (e *BatchError) Unwrap() []error {
+	errs := make([]error, 0, len(e.Errs))
+	for _, err := range e.Errs {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
 }
 
 // AnalyzeDB is the interface for the DB that can perform an analysis on given table.
