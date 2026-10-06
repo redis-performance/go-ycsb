@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/pingcap/go-ycsb/pkg/util"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9/maintnotifications"
 )
 
 const HASH_DATATYPE string = "hash"
@@ -271,6 +273,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		clusterClient.ReloadState(context.Background())
 		err = clusterClient.Ping(context.Background()).Err()
 		if err != nil {
+			clusterClient.Close()
 			return nil, err
 		}
 		if p.GetBool(prop.DropData, prop.DropDataDefault) {
@@ -282,6 +285,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 				return master.FlushDB(ctx).Err()
 			})
 			if err != nil {
+				clusterClient.Close()
 				return nil, err
 			}
 		}
@@ -294,6 +298,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		singleEndpointClient := goredis.NewClient(singleOpts)
 		err = singleEndpointClient.Ping(context.Background()).Err()
 		if err != nil {
+			singleEndpointClient.Close()
 			return nil, err
 		}
 		rds.client = singleEndpointClient
@@ -301,6 +306,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		if p.GetBool(prop.DropData, prop.DropDataDefault) {
 			err := rds.client.FlushDB(context.Background()).Err()
 			if err != nil {
+				rds.client.Close()
 				return nil, err
 			}
 		}
@@ -348,7 +354,76 @@ const (
 	redisTLSCert               = "redis.tls_cert"
 	redisTLSKey                = "redis.tls_key"
 	redisTLSInsecureSkipVerify = "redis.tls_insecure_skip_verify"
+	redisProtocol              = "redis.protocol"
+	redisProtocolDefault       = 3
+	redisMaintNotifications    = "redis.maint_notifications"
+	redisReadBufferSize        = "redis.read_buffer_size"
+	redisWriteBufferSize       = "redis.write_buffer_size"
+	// go-redis v9.8.0's buffers: bufio's default size
+	redisBufferSizeDefault    = 4096
+	redisDialerRetries        = "redis.dialer_retries"
+	redisDialerRetriesDefault = 1
+	redisMaxConcurrentDials   = "redis.max_concurrent_dials"
+	redisRoutingPolicies      = "redis.routing_policies"
+	// go-redis v9.8.0's defaults
+	redisMinRetryBackoffDefault            = 8 * time.Millisecond
+	redisMaxRetryBackoffDefault            = 512 * time.Millisecond
+	redisReadTimeoutDefault                = 3 * time.Second
+	redisClusterStateReloadInterval        = "redis.cluster_state_reload_interval"
+	redisClusterStateReloadIntervalDefault = 10 * time.Second
 )
+
+// clientBehaviour is how the client talks to Redis where go-redis changed
+// its defaults after v9.8.0: by default as v9.8.0 did, so that runs compare
+// across go-ycsb builds, and the newer behaviour on request.
+type clientBehaviour struct {
+	protocol           int
+	maintNotifications *maintnotifications.Config
+	readBufferSize     int
+	writeBufferSize    int
+	dialerRetries      int
+	maxConcurrentDials int
+	routingPolicies    bool
+}
+
+func parseClientBehaviour(p *properties.Properties) (clientBehaviour, error) {
+	r := &propReader{p: p}
+	b := clientBehaviour{
+		protocol:           r.int(redisProtocol, redisProtocolDefault),
+		readBufferSize:     r.int(redisReadBufferSize, redisBufferSizeDefault),
+		writeBufferSize:    r.int(redisWriteBufferSize, redisBufferSizeDefault),
+		dialerRetries:      r.int(redisDialerRetries, redisDialerRetriesDefault),
+		maxConcurrentDials: r.int(redisMaxConcurrentDials, 0),
+		routingPolicies:    r.bool(redisRoutingPolicies, false),
+	}
+	if r.err != nil {
+		return b, r.err
+	}
+	if b.protocol != 2 && b.protocol != 3 {
+		return b, fmt.Errorf("%s must be 2 or 3, got %d", redisProtocol, b.protocol)
+	}
+	mode := maintnotifications.ModeDisabled
+	if v, ok := r.value(redisMaintNotifications); ok {
+		mode = maintnotifications.Mode(strings.ToLower(v))
+	}
+	if !mode.IsValid() {
+		return b, fmt.Errorf("%s must be disabled, auto or enabled, got %q", redisMaintNotifications, mode)
+	}
+	if mode == maintnotifications.ModeEnabled && b.protocol != 3 {
+		return b, fmt.Errorf("%s=enabled needs %s=3: go-redis handles maintenance notifications over RESP3 only", redisMaintNotifications, redisProtocol)
+	}
+	b.maintNotifications = &maintnotifications.Config{Mode: mode}
+	if b.readBufferSize <= 0 || b.writeBufferSize <= 0 {
+		return b, fmt.Errorf("%s and %s must be > 0, got %d and %d", redisReadBufferSize, redisWriteBufferSize, b.readBufferSize, b.writeBufferSize)
+	}
+	if b.dialerRetries < 1 {
+		return b, fmt.Errorf("%s must be >= 1, got %d", redisDialerRetries, b.dialerRetries)
+	}
+	if b.maxConcurrentDials < 0 {
+		return b, fmt.Errorf("%s must be >= 0, got %d", redisMaxConcurrentDials, b.maxConcurrentDials)
+	}
+	return b, nil
+}
 
 // parseTLS returns (nil, nil) when no TLS property is set at all - the
 // caller then dials plaintext, same as before. Any other outcome (a cert
@@ -360,7 +435,11 @@ func parseTLS(p *properties.Properties) (*tls.Config, error) {
 	caPath, _ := p.Get(redisTLSCA)
 	certPath, _ := p.Get(redisTLSCert)
 	keyPath, _ := p.Get(redisTLSKey)
-	insecureSkipVerify := p.GetBool(redisTLSInsecureSkipVerify, false)
+	r := &propReader{p: p}
+	insecureSkipVerify := r.bool(redisTLSInsecureSkipVerify, false)
+	if r.err != nil {
+		return nil, r.err
+	}
 
 	if caPath == "" && certPath == "" && keyPath == "" {
 		return nil, nil
@@ -375,21 +454,136 @@ func parseTLS(p *properties.Properties) (*tls.Config, error) {
 	return config, nil
 }
 
+// getDuration reads a duration property: a Go duration ("30s", "500ms") or,
+// as before, an integer number of nanoseconds. Unset means def; anything else
+// is an error, rather than def in silence.
+func getDuration(p *properties.Properties, key string, def time.Duration) (time.Duration, error) {
+	v, ok := p.Get(key)
+	v = strings.TrimSpace(v)
+	if !ok || v == "" {
+		return def, nil
+	}
+	if ns, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return time.Duration(ns), nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q: want a duration like 30s or 500ms, or an integer number of nanoseconds", key, v)
+	}
+	return d, nil
+}
+
+// propReader reads redis.* properties strictly: a value that doesn't parse
+// is an error naming the property (the first one is kept), never the default
+// in silence, as magiconair/properties' GetInt/GetBool/GetDuration do.
+type propReader struct {
+	p   *properties.Properties
+	err error
+}
+
+func (r *propReader) fail(err error) {
+	if r.err == nil {
+		r.err = err
+	}
+}
+
+func (r *propReader) value(key string) (string, bool) {
+	v, ok := r.p.Get(key)
+	v = strings.TrimSpace(v)
+	return v, ok && v != ""
+}
+
+func (r *propReader) duration(key string, def time.Duration) time.Duration {
+	d, err := getDuration(r.p, key, def)
+	if err != nil {
+		r.fail(err)
+	}
+	return d
+}
+
+func (r *propReader) int(key string, def int) int {
+	v, ok := r.value(key)
+	if !ok {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		r.fail(fmt.Errorf("%s=%q: want an integer", key, v))
+		return def
+	}
+	return n
+}
+
+// retries reads a retry count: 0 is go-redis's default, -1 none. Below -1
+// go-redis would run a command's try loop zero times, so that every command
+// "succeeds" without being sent: that is an error.
+func (r *propReader) retries(key string) int {
+	n := r.int(key, 0)
+	if n < -1 {
+		r.fail(fmt.Errorf("%s=%d: want -1 (no retries), 0 (go-redis's default) or more", key, n))
+		return 0
+	}
+	return n
+}
+
+// bool takes what magiconair/properties takes for true (1, true, yes, on)
+// and their opposites for false.
+func (r *propReader) bool(key string, def bool) bool {
+	v, ok := r.value(key)
+	if !ok {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	r.fail(fmt.Errorf("%s=%q: want true or false", key, v))
+	return def
+}
+
+// retryBackoffs reads the retry backoffs. An explicit 0 means go-redis's
+// default, which v9.22.0 changed (10 ms / 1 s): it is v9.8.0's 8 ms / 512 ms,
+// like the unset default.
+func retryBackoffs(r *propReader) (time.Duration, time.Duration) {
+	minBackoff := r.duration(redisMinRetryBackoff, redisMinRetryBackoffDefault)
+	maxBackoff := r.duration(redisMaxRetryBackoff, redisMaxRetryBackoffDefault)
+	if minBackoff == 0 {
+		minBackoff = redisMinRetryBackoffDefault
+	}
+	if maxBackoff == 0 {
+		maxBackoff = redisMaxRetryBackoffDefault
+	}
+	return minBackoff, maxBackoff
+}
+
+// newClusterNodeClient makes a cluster node's client as go-redis does, but a
+// node read timeout of 0, which a cluster read timeout of -1 gives the nodes
+// (the cluster's pipelines then have no deadline), is v9.8.0's 3 s for the
+// commands sent on their own, not v9.22.0's 5 s.
+func newClusterNodeClient(opt *goredis.Options) *goredis.Client {
+	if opt.ReadTimeout == 0 {
+		opt.ReadTimeout = redisReadTimeoutDefault
+	}
+	return goredis.NewClient(opt)
+}
+
 func getOptionsSingle(p *properties.Properties) (*goredis.Options, error) {
 	opts := &goredis.Options{}
+	r := &propReader{p: p}
 
 	opts.Addr = p.GetString(redisAddr, redisAddrDefault)
-	opts.DB = p.GetInt(redisDB, 0)
+	opts.DB = r.int(redisDB, 0)
 	opts.Network = p.GetString(redisNetwork, redisNetworkDefault)
 	opts.Username = p.GetString(redisUsername, "")
 	opts.Password, _ = p.Get(redisPassword)
-	opts.MaxRetries = p.GetInt(redisMaxRetries, 0)
-	opts.MinRetryBackoff = p.GetDuration(redisMinRetryBackoff, time.Millisecond*8)
-	opts.MaxRetryBackoff = p.GetDuration(redisMaxRetryBackoff, time.Millisecond*512)
-	opts.DialTimeout = p.GetDuration(redisDialTimeout, time.Second*5)
-	opts.ReadTimeout = p.GetDuration(redisReadTimeout, time.Second*3)
-	opts.WriteTimeout = p.GetDuration(redisWriteTimeout, opts.ReadTimeout)
-	opts.PoolSize = p.GetInt(redisPoolSize, redisPoolSizeDefault)
+	opts.MaxRetries = r.retries(redisMaxRetries)
+	opts.MinRetryBackoff, opts.MaxRetryBackoff = retryBackoffs(r)
+	opts.DialTimeout = r.duration(redisDialTimeout, time.Second*5)
+	opts.ReadTimeout = r.duration(redisReadTimeout, redisReadTimeoutDefault)
+	opts.WriteTimeout = r.duration(redisWriteTimeout, opts.ReadTimeout)
+	opts.PoolSize = r.int(redisPoolSize, redisPoolSizeDefault)
 	if opts.PoolSize < 0 {
 		return nil, fmt.Errorf("%s must be >= 0, got %d", redisPoolSize, opts.PoolSize)
 	}
@@ -401,48 +595,68 @@ func getOptionsSingle(p *properties.Properties) (*goredis.Options, error) {
 		opts.PoolSize = threadCount
 		fmt.Println(fmt.Sprintf("Setting %s=%d (from <threadcount>) given you haven't specified a value.", redisPoolSize, opts.PoolSize))
 	}
-	opts.MinIdleConns = p.GetInt(redisMinIdleConns, opts.PoolSize)
-	opts.MaxIdleConns = p.GetInt(redisMaxIdleConns, opts.PoolSize)
+	opts.MinIdleConns = r.int(redisMinIdleConns, opts.PoolSize)
+	opts.MaxIdleConns = r.int(redisMaxIdleConns, opts.PoolSize)
 	// Since go-redis 9.0.0 the MaxConnAge option was Renamed to ConnMaxLifetime
 	// Expired connections may be closed lazily before reuse.
 	// If <= 0, connections are not closed due to a connection's age.
-	opts.ConnMaxLifetime = p.GetDuration(redisMaxConnAge, -1)
+	opts.ConnMaxLifetime = r.duration(redisMaxConnAge, -1)
 	// Amount of time client waits for connection if all connections
 	// are busy before returning an error.
 	// Default is ReadTimeout + 1 second.
-	opts.PoolTimeout = p.GetDuration(redisPoolTimeout, time.Second+opts.ReadTimeout)
+	opts.PoolTimeout = r.duration(redisPoolTimeout, time.Second+opts.ReadTimeout)
+	// an explicit 0 means go-redis's default read timeout: v9.8.0's 3 s, not
+	// v9.22.0's 5 s (after the pool timeout, which v9.8.0 took from the 0)
+	if opts.ReadTimeout == 0 {
+		opts.ReadTimeout = redisReadTimeoutDefault
+	}
 	// Since go-redis 9.0.0 the MaxConnAge option was Renamed to ConnMaxLifetime
 	// Expired connections may be closed lazily before reuse.
 	// If d <= 0, connections are not closed due to a connection's idle time.
 	// -1 disables idle timeout check.
-	opts.ConnMaxIdleTime = p.GetDuration(redisIdleTimeout, -1)
+	opts.ConnMaxIdleTime = r.duration(redisIdleTimeout, -1)
+	if r.err != nil {
+		return nil, r.err
+	}
 	tlsConfig, err := parseTLS(p)
 	if err != nil {
 		return nil, err
 	}
 	opts.TLSConfig = tlsConfig
+
+	b, err := parseClientBehaviour(p)
+	if err != nil {
+		return nil, err
+	}
+	if b.routingPolicies {
+		fmt.Printf("%s has no effect in single mode (it is for cluster mode)\n", redisRoutingPolicies)
+	}
+	opts.Protocol = b.protocol
+	opts.MaintNotificationsConfig = b.maintNotifications
+	opts.ReadBufferSize, opts.WriteBufferSize = b.readBufferSize, b.writeBufferSize
+	opts.DialerRetries, opts.MaxConcurrentDials = b.dialerRetries, b.maxConcurrentDials
 
 	return opts, nil
 }
 
 func getOptionsCluster(p *properties.Properties) (*goredis.ClusterOptions, error) {
 	opts := &goredis.ClusterOptions{}
+	r := &propReader{p: p}
 
 	addresses, _ := p.Get(redisAddr)
 	opts.Addrs = strings.Split(addresses, ";")
-	opts.MaxRedirects = p.GetInt(redisMaxRedirects, 0)
-	opts.ReadOnly = p.GetBool(redisReadOnly, false)
-	opts.RouteByLatency = p.GetBool(redisRouteByLatency, false)
-	opts.RouteRandomly = p.GetBool(redisRouteRandomly, false)
+	opts.MaxRedirects = r.retries(redisMaxRedirects)
+	opts.ReadOnly = r.bool(redisReadOnly, false)
+	opts.RouteByLatency = r.bool(redisRouteByLatency, false)
+	opts.RouteRandomly = r.bool(redisRouteRandomly, false)
 	opts.Username = p.GetString(redisUsername, "")
 	opts.Password, _ = p.Get(redisPassword)
-	opts.MaxRetries = p.GetInt(redisMaxRetries, 0)
-	opts.MinRetryBackoff = p.GetDuration(redisMinRetryBackoff, time.Millisecond*8)
-	opts.MaxRetryBackoff = p.GetDuration(redisMaxRetryBackoff, time.Millisecond*512)
-	opts.DialTimeout = p.GetDuration(redisDialTimeout, time.Second*5)
-	opts.ReadTimeout = p.GetDuration(redisReadTimeout, time.Second*3)
-	opts.WriteTimeout = p.GetDuration(redisWriteTimeout, opts.ReadTimeout)
-	opts.PoolSize = p.GetInt(redisPoolSize, redisPoolSizeDefault)
+	opts.MaxRetries = r.retries(redisMaxRetries)
+	opts.MinRetryBackoff, opts.MaxRetryBackoff = retryBackoffs(r)
+	opts.DialTimeout = r.duration(redisDialTimeout, time.Second*5)
+	opts.ReadTimeout = r.duration(redisReadTimeout, redisReadTimeoutDefault)
+	opts.WriteTimeout = r.duration(redisWriteTimeout, opts.ReadTimeout)
+	opts.PoolSize = r.int(redisPoolSize, redisPoolSizeDefault)
 	if opts.PoolSize < 0 {
 		return nil, fmt.Errorf("%s must be >= 0, got %d", redisPoolSize, opts.PoolSize)
 	}
@@ -454,26 +668,52 @@ func getOptionsCluster(p *properties.Properties) (*goredis.ClusterOptions, error
 		opts.PoolSize = threadCount
 		fmt.Println(fmt.Sprintf("Setting %s=%d (from <threadcount>) given you haven't specified a value.", redisPoolSize, opts.PoolSize))
 	}
-	opts.MinIdleConns = p.GetInt(redisMinIdleConns, opts.PoolSize)
-	opts.MaxIdleConns = p.GetInt(redisMaxIdleConns, opts.PoolSize)
+	opts.MinIdleConns = r.int(redisMinIdleConns, opts.PoolSize)
+	opts.MaxIdleConns = r.int(redisMaxIdleConns, opts.PoolSize)
 	// Since go-redis 9.0.0 the MaxConnAge option was Renamed to ConnMaxLifetime
 	// Expired connections may be closed lazily before reuse.
 	// If <= 0, connections are not closed due to a connection's age.
-	opts.ConnMaxLifetime = p.GetDuration(redisMaxConnAge, -1)
+	opts.ConnMaxLifetime = r.duration(redisMaxConnAge, -1)
 	// Amount of time client waits for connection if all connections
 	// are busy before returning an error.
 	// Default is ReadTimeout + 1 second.
-	opts.PoolTimeout = p.GetDuration(redisPoolTimeout, time.Second+opts.ReadTimeout)
+	opts.PoolTimeout = r.duration(redisPoolTimeout, time.Second+opts.ReadTimeout)
+	// an explicit 0 means go-redis's default read timeout: v9.8.0's 3 s, not
+	// v9.22.0's 5 s (after the pool timeout, which v9.8.0 took from the 0)
+	if opts.ReadTimeout == 0 {
+		opts.ReadTimeout = redisReadTimeoutDefault
+	}
 	// Since go-redis 9.0.0 the MaxConnAge option was Renamed to ConnMaxLifetime
 	// Expired connections may be closed lazily before reuse.
 	// If d <= 0, connections are not closed due to a connection's idle time.
 	// -1 disables idle timeout check.
-	opts.ConnMaxIdleTime = p.GetDuration(redisIdleTimeout, -1)
+	opts.ConnMaxIdleTime = r.duration(redisIdleTimeout, -1)
+	if r.err != nil {
+		return nil, r.err
+	}
 	tlsConfig, err := parseTLS(p)
 	if err != nil {
 		return nil, err
 	}
 	opts.TLSConfig = tlsConfig
+
+	b, err := parseClientBehaviour(p)
+	if err != nil {
+		return nil, err
+	}
+	opts.Protocol = b.protocol
+	opts.MaintNotificationsConfig = b.maintNotifications
+	opts.ReadBufferSize, opts.WriteBufferSize = b.readBufferSize, b.writeBufferSize
+	opts.DialerRetries, opts.MaxConcurrentDials = b.dialerRetries, b.maxConcurrentDials
+	opts.DisableRoutingPolicies = !b.routingPolicies
+	opts.NewClient = newClusterNodeClient
+	// go-redis v9.8.0 reloaded the slots every 10 s; v9.22.0's default is 60 s
+	if opts.ClusterStateReloadInterval, err = getDuration(p, redisClusterStateReloadInterval, redisClusterStateReloadIntervalDefault); err != nil {
+		return nil, err
+	}
+	if opts.ClusterStateReloadInterval <= 0 {
+		return nil, fmt.Errorf("%s must be > 0, got %v", redisClusterStateReloadInterval, opts.ClusterStateReloadInterval)
+	}
 
 	return opts, nil
 }
