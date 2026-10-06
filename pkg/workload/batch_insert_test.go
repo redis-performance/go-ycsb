@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -29,8 +31,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	// DbWrapper measures through the measurement package
-	measurement.InitMeasure(properties.NewProperties())
+	// DbWrapper measures through the measurement package; a child process of
+	// TestReadModifyWriteRowsThroughTheWrapper records them to a CSV file
+	p := properties.NewProperties()
+	if out := os.Getenv(rmwRowsOut); out != "" {
+		p.Set(prop.MeasurementType, "raw")
+		p.Set(prop.MeasurementRawOutputFile, out)
+	}
+	measurement.InitMeasure(p)
 	os.Exit(m.Run())
 }
 
@@ -285,7 +293,10 @@ func TestReadModifyWriteMeasurement(t *testing.T) {
 		{stopped, nil, nil, nil},
 	} {
 		got = nil
-		_ = c.doTransactionReadModifyWrite(tc.ctx, rmwDB{&batchRecorder{}, tc.readErr, tc.updateErr}, state)
+		err := c.doTransactionReadModifyWrite(tc.ctx, rmwDB{&batchRecorder{}, tc.readErr, tc.updateErr}, state)
+		if tc.ctx.Err() != nil && (!errors.Is(err, ycsb.ErrNotRun) || !errors.Is(err, context.Canceled)) {
+			t.Errorf("stopped before it ran: %v, want ycsb.ErrNotRun and the stop", err)
+		}
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("read error %v, update error %v, stopped %v: recorded %v, want %v",
 				tc.readErr, tc.updateErr, tc.ctx.Err() != nil, got, tc.want)
@@ -331,6 +342,56 @@ func TestReadModifyWriteStoppedBeforeItsUpdate(t *testing.T) {
 	for _, op := range got {
 		if strings.HasPrefix(op, "READ_MODIFY_WRITE") {
 			t.Fatalf("recorded %s for a READ_MODIFY_WRITE the stop cut before its update", op)
+		}
+	}
+}
+
+const (
+	rmwRowsOut  = "GO_YCSB_TEST_RMW_ROWS_OUT"  // the child's CSV file
+	rmwRowsFail = "GO_YCSB_TEST_RMW_ROWS_FAIL" // the half the child's DB fails
+)
+
+// A failed READ_MODIFY_WRITE run through the client's DbWrapper shows in two
+// rows: its failed half's READ_ERROR or UPDATE_ERROR (the wrapper's), and
+// READ_MODIFY_WRITE_ERROR. Measured for real (the measurement package
+// records to a CSV file, once per process), in a child process per case.
+func TestReadModifyWriteRowsThroughTheWrapper(t *testing.T) {
+	if half := os.Getenv(rmwRowsFail); half != "" {
+		w, ctx := newBatchCore(t, 0)
+		c := w.(*core)
+		db := rmwDB{batchRecorder: &batchRecorder{}}
+		if half == "read" {
+			db.readErr = errors.New("OOM")
+		} else {
+			db.updateErr = errors.New("OOM")
+		}
+		_ = c.doTransactionReadModifyWrite(ctx, client.DbWrapper{DB: db}, ctx.Value(stateKey).(*coreState))
+		if err := measurement.Output(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	for half, want := range map[string]map[string]int{
+		"read":   {"READ_ERROR": 1, "READ_MODIFY_WRITE_ERROR": 1},
+		"update": {"READ": 1, "TOTAL": 1, "UPDATE_ERROR": 1, "READ_MODIFY_WRITE_ERROR": 1},
+	} {
+		out := filepath.Join(t.TempDir(), "rows.csv")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestReadModifyWriteRowsThroughTheWrapper$")
+		cmd.Env = append(os.Environ(), rmwRowsOut+"="+out, rmwRowsFail+"="+half)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s fails: child: %v\n%s", half, err, b)
+		}
+		b, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]int{}
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n")[1:] {
+			op, _, _ := strings.Cut(line, ",")
+			got[op]++
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s fails: rows %v, want %v", half, got, want)
 		}
 	}
 }

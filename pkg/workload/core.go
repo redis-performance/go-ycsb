@@ -580,7 +580,7 @@ func (c *core) doTransactionReadModifyWrite(ctx context.Context, db ycsb.DB, sta
 	// its update, which the client then didn't send); a failure is
 	// READ_MODIFY_WRITE_ERROR
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ycsb.ErrNotRun, err)
 	}
 	start := time.Now()
 	defer func() {
