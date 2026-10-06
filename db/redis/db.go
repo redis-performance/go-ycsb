@@ -273,6 +273,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		clusterClient.ReloadState(context.Background())
 		err = clusterClient.Ping(context.Background()).Err()
 		if err != nil {
+			clusterClient.Close()
 			return nil, err
 		}
 		if p.GetBool(prop.DropData, prop.DropDataDefault) {
@@ -284,6 +285,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 				return master.FlushDB(ctx).Err()
 			})
 			if err != nil {
+				clusterClient.Close()
 				return nil, err
 			}
 		}
@@ -296,6 +298,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		singleEndpointClient := goredis.NewClient(singleOpts)
 		err = singleEndpointClient.Ping(context.Background()).Err()
 		if err != nil {
+			singleEndpointClient.Close()
 			return nil, err
 		}
 		rds.client = singleEndpointClient
@@ -303,6 +306,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		if p.GetBool(prop.DropData, prop.DropDataDefault) {
 			err := rds.client.FlushDB(context.Background()).Err()
 			if err != nil {
+				rds.client.Close()
 				return nil, err
 			}
 		}
