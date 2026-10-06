@@ -151,7 +151,8 @@ func TestClientBehaviourProperties(t *testing.T) {
 	}
 }
 
-// redis.routing_policies does nothing in single mode, and says so.
+// redis.routing_policies does nothing in single mode, and says so when it is
+// set to true (false is what single mode does anyway).
 func TestRoutingPoliciesSingleModeWarning(t *testing.T) {
 	out := func(props ...string) string {
 		p := properties.NewProperties()
@@ -177,7 +178,9 @@ func TestRoutingPoliciesSingleModeWarning(t *testing.T) {
 	if got := out(redisRoutingPolicies, "true"); !strings.Contains(got, redisRoutingPolicies+" has no effect in single mode") {
 		t.Errorf("no warning for %s in single mode: %q", redisRoutingPolicies, got)
 	}
-	if got := out(); strings.Contains(got, redisRoutingPolicies) {
-		t.Errorf("a warning without the property: %q", got)
+	for _, props := range [][]string{nil, {redisRoutingPolicies, "false"}} {
+		if got := out(props...); strings.Contains(got, redisRoutingPolicies) {
+			t.Errorf("a warning with %v: %q", props, got)
+		}
 	}
 }

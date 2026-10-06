@@ -607,7 +607,7 @@ func getOptionsSingle(p *properties.Properties) (*goredis.Options, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, set := p.Get(redisRoutingPolicies); set {
+	if b.routingPolicies {
 		fmt.Printf("%s has no effect in single mode (it is for cluster mode)\n", redisRoutingPolicies)
 	}
 	opts.Protocol = b.protocol
