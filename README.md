@@ -168,7 +168,6 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
   - **Batched runs, other changes.** With `target`, the threads of a batched run or load start at random points of one batch period, so a short throttled one falls a few percent short of `target`. With `warmuptime`, a batch is measured and counted as a whole or not at all, by whether the warm-up was over when it started.
   - **New log lines.** With errors printed (`silence=false`): "operation err: N of M records failed, the first: ..." for a batch with failed records; in a `run`, "operation err: not run: the run stopped: ..." for an operation the stop came before. A `load` prints none of the stop's errors: its insert, stopped, returns no error.
   - **Batch retries.** With `core_workload_insertion_retry_limit` set, a batch that succeeded was sent again, once per allowed retry, each time counted, and a batch that failed was never retried. Now only a batch's failed records are retried.
-  - **Property parsing.** Some unchanged configurations now run differently, because values that used to be ignored are now read (see the [Redis](#redis) section): `redis.read_timeout=30s`, for one, ran at 3 s and now runs at 30 s, and an explicit `redis.read_timeout=0` now means 5 s, where it meant 3 s.
   - **A load's warm-up.** With `warmuptime` set, a load started a warm-up anyway: its first records could go unmeasured and, uncounted, could make the threads insert past `insertcount`. A load has no warm-up now.
 
 ## Output configuration
