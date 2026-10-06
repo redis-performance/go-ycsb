@@ -221,6 +221,38 @@ summaries round latencies to microseconds. `rate(ycsb_latency_seconds_bucket[5m]
 `histogram_quantile()` for a rolling latency estimate. For example,
 `histogram_quantile(0.99, sum by (le, op) (rate(ycsb_latency_seconds_bucket[5m])))` estimates p99 per operation;
 retain the desired run labels in the grouping when scraping multiple runs.
+
+Import [`dashboards/ycsb-latency-heatmap.json`](dashboards/ycsb-latency-heatmap.json) into Grafana for a live
+latency heatmap and rolling p50/p99 estimates. Select the Prometheus data source, then one job, instance,
+operation and a 30s or 60s window. If your scraper adds labels that distinguish simultaneous runs or phases on
+the same target, add selectors for those labels to the panel queries to avoid combining their distributions. The
+dashboard needs Prometheus to scrape the exporter; on the same host, a minimal scrape job is:
+
+```yaml
+scrape_configs:
+  - job_name: go-ycsb
+    scrape_interval: 1s
+    static_configs:
+      - targets: ['127.0.0.1:9464']
+```
+
+Adjust the target when Prometheus runs elsewhere. The
+heatmap uses `sum by (le) (rate(ycsb_latency_seconds_bucket{...}[$window]))` with the Prometheus query format set to
+Heatmap; Grafana converts cumulative buckets into per-range cells. Scrape at 1s for frequent updates. Each column
+is a trailing 30s or 60s average of bucket rates, so a 1s scrape does not resolve individual one-second events. The
+30s view needs at least two scrapes in its range, and its newest point is delayed by the scrape interval. The
+distribution is limited to the exporter's 33 finite bucket boundaries plus `+Inf` (latencies above 60s share that
+last bucket); HDR interval quantiles remain
+available separately. At 1s scraping, this histogram contributes 36 samples per second per operation (34 buckets,
+`_sum`, `_count`), before Prometheus labels and storage overhead. No additional histogram ring or recording work
+is needed in go-ycsb for this heatmap. The dashboard refreshes every 5s by default; Grafana's default minimum
+refresh interval is 5s, so a 1s dashboard refresh requires changing that Grafana setting.
+
+Future packed HDR windows need more than `PackedHistogram` recording support: the type merged in
+[hdrhistogram-go PR #75](https://github.com/HdrHistogram/hdrhistogram-go/pull/75) has no reset, merge or sparse
+iteration API for combining 1s slices into a 30s/60s HDR snapshot. Keep the cumulative Prometheus histogram as a
+counter; a rolling HDR distribution would need a separate representation and an off-recording-path merge.
+
 `TOTAL` repeats successful per-operation samples, and `BATCH_*` measures batch calls; keep these separate from
 record-level operations when aggregating distributions.
 Interval series appear after the first interval ends, and an operation's interval series are omitted when it had no

@@ -1,0 +1,146 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Each column is a trailing, overlapping 30s or 60s average. Each cell shows operations per second in that latency range. The exporter uses 33 finite bucket bounds from 100 microseconds to 60 seconds, plus +Inf.",
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "color": { "mode": "scheme" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64 },
+        "dataFormat": "tsbuckets",
+        "legend": { "show": true },
+        "tooltip": { "show": true },
+        "yAxis": { "axisPlacement": "left", "unit": "s" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (le) (rate(ycsb_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",op=\"$op\"}[$window]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Latency distribution · $op · $window",
+      "type": "heatmap"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Estimates from the fixed Prometheus buckets. HDR interval percentiles remain available in ycsb_interval_latency_seconds.",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(ycsb_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",op=\"$op\"}[$window])))",
+          "legendFormat": "p50",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ycsb_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",op=\"$op\"}[$window])))",
+          "legendFormat": "p99",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Rolling latency estimates · $op · $window",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["ycsb", "latency", "prometheus"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(ycsb_latency_seconds_bucket, job)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Job",
+        "name": "job",
+        "options": [],
+        "query": { "query": "label_values(ycsb_latency_seconds_bucket, job)", "refId": "StandardVariableQuery" },
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(ycsb_latency_seconds_bucket{job=~\"$job\"}, instance)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Instance",
+        "name": "instance",
+        "options": [],
+        "query": { "query": "label_values(ycsb_latency_seconds_bucket{job=~\"$job\"}, instance)", "refId": "StandardVariableQuery" },
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(ycsb_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\"}, op)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Operation",
+        "name": "op",
+        "options": [],
+        "query": { "query": "label_values(ycsb_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\"}, op)", "refId": "StandardVariableQuery" },
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "30s", "value": "30s" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Window",
+        "name": "window",
+        "options": [
+          { "selected": true, "text": "30s", "value": "30s" },
+          { "selected": false, "text": "60s", "value": "60s" }
+        ],
+        "query": "30s,60s",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": { "from": "now-5m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "YCSB live latency distribution",
+  "uid": "ycsb-latency-heatmap",
+  "version": 1
+}
