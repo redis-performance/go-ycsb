@@ -561,6 +561,10 @@ make test-integration-couchbase
 # errors, no COMMAND or CLIENT MAINT_NOTIFICATIONS on the nodes)
 make test-integration-redis
 
+# Batched loads (batch.size 1, 7, 100) into a dockerized single Redis and a
+# 6-node Redis Cluster: DBSIZE, key set and values checked against batch.size=1
+make test-integration-redis-batch
+
 # Cosmos DB adapter (core + feature-store workloads, a cross-partition Scan,
 # a field-preservation regression check, and an
 # auto_create_container=false negative check) against a dockerized Azure

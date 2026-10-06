@@ -67,6 +67,19 @@ test-integration-stop-signal:
 test-integration-interval-output:
 	./test/integration/interval_output.sh
 
+# Loads the feature-store workload into a dockerized single Redis and a
+# 6-node Redis Cluster with batch.size 1, 7 and 100, checking DBSIZE, the key
+# set and every value against batch.size=1. Same target locally and in CI.
+test-integration-redis-batch:
+	./test/integration/redis_batch.sh
+
+# Unit tests of batched loads and runs: the redis adapter's pipelined
+# BatchInsert (commands and cluster routing against fake nodes, per-record
+# errors) and the client/workload/measurement side (key ranges, retries,
+# per-record counting, warm-up).
+test-batch:
+	go test -race ./db/redis/ ./pkg/client/ ./pkg/workload/ ./pkg/ycsb/ ./pkg/measurement/
+
 # Runs db/cassandra/db.go's TLS support against a dockerized, TLS-enabled
 # ScyllaDB node, asserting both that a connection using the correct CA
 # succeeds AND that one using an unrelated CA is rejected - the second
