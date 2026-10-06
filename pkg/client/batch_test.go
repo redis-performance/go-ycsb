@@ -744,15 +744,19 @@ func (d cancelDB) Insert(ctx context.Context, _ string, _ string, _ map[string][
 // sleepDB's Read takes as long as its key says.
 type sleepDB struct{ *memDB }
 
+// slowRead is how long sleepDB's "slow" record takes.
+const slowRead = time.Second
+
 func (d sleepDB) Read(_ context.Context, _ string, key string, _ []string) (map[string][]byte, error) {
 	if key == "slow" {
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(slowRead)
 	}
 	return nil, nil
 }
 
 // Without the batch operation, each record is timed on its own: a fast record
-// after a slow one isn't charged the slow one's time.
+// after a slow one isn't charged the slow one's time. The fast one's bound,
+// half the slow one's, leaves a loaded -race runner room to spare.
 func TestBatchFallbackTimesEachRecord(t *testing.T) {
 	var lats []time.Duration
 	orig := measureN
@@ -763,8 +767,8 @@ func TestBatchFallbackTimesEachRecord(t *testing.T) {
 	}
 	t.Cleanup(func() { measureN = orig })
 	_, _ = DbWrapper{sleepDB{newMemDB()}}.BatchRead(context.Background(), "t", []string{"slow", "fast"}, nil)
-	if len(lats) != 2 || lats[0] < 30*time.Millisecond || lats[1] >= 30*time.Millisecond {
-		t.Fatalf("latencies %v, want the slow record >= 30ms and the fast one < 30ms", lats)
+	if len(lats) != 2 || lats[0] < slowRead || lats[1] >= slowRead/2 {
+		t.Fatalf("latencies %v, want the slow record >= %v and the fast one < %v", lats, slowRead, slowRead/2)
 	}
 }
 
