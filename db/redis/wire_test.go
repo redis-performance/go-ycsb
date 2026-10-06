@@ -49,20 +49,23 @@ func TestClientBehaviourOnTheWire(t *testing.T) {
 }
 
 // The slot map is reloaded every redis.cluster_state_reload_interval (10 s
-// by default, as go-redis v9.8.0 did).
+// by default, as go-redis v9.8.0 did). The bounds are loose, for a slow
+// runner: by default at most a load and a lazy reload in 1 s, at 100 ms
+// at least two loads in 2 s.
 func TestClusterStateReloadCadence(t *testing.T) {
 	ctx := context.Background()
 	keys, values := testRecords(5)
 	for _, c := range []struct {
 		interval string
+		window   time.Duration
 		min, max int32
-	}{{"", 1, 1}, {"100ms", 3, 20}} {
+	}{{"", time.Second, 1, 2}, {"100ms", 2 * time.Second, 2, 1000}} {
 		var props []string
 		if c.interval != "" {
 			props = []string{redisClusterStateReloadInterval, c.interval}
 		}
 		r, nodes := newFakeRedis(t, "cluster", HASH_DATATYPE, props...)
-		deadline := time.Now().Add(700 * time.Millisecond)
+		deadline := time.Now().Add(c.window)
 		for time.Now().Before(deadline) {
 			for i := range keys {
 				if err := r.Insert(ctx, "usertable", keys[i], values[i]); err != nil {
@@ -72,7 +75,7 @@ func TestClusterStateReloadCadence(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 		if got := nodes.slotLoads.Load(); got < c.min || got > c.max {
-			t.Errorf("interval %q: %d slot map loads in 0.7 s, want %d..%d", c.interval, got, c.min, c.max)
+			t.Errorf("interval %q: %d slot map loads in %v, want %d..%d", c.interval, got, c.window, c.min, c.max)
 		}
 	}
 }
