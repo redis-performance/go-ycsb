@@ -82,12 +82,27 @@ func TestRedisBatchLoad(t *testing.T) {
 			// count as INSERT_ERROR, one each; the rest as INSERT, which is
 			// then what the database holds.
 			t.Run("oom", func(t *testing.T) {
+				// each master's eviction policy, put back after the test
+				var policies sync.Map
 				db.eachMaster(t, func(m *goredis.Client) error {
-					return m.ConfigSet(context.Background(), "maxmemory-policy", "noeviction").Err()
+					ctx := context.Background()
+					policy, err := m.ConfigGet(ctx, "maxmemory-policy").Result()
+					if err != nil {
+						return err
+					}
+					policies.Store(m.Options().Addr, policy["maxmemory-policy"])
+					return m.ConfigSet(ctx, "maxmemory-policy", "noeviction").Err()
 				})
 				t.Cleanup(func() {
 					db.eachMaster(t, func(m *goredis.Client) error {
-						return m.ConfigSet(context.Background(), "maxmemory", "0").Err()
+						ctx := context.Background()
+						if err := m.ConfigSet(ctx, "maxmemory", "0").Err(); err != nil {
+							return err
+						}
+						if policy, ok := policies.Load(m.Options().Addr); ok && policy.(string) != "" {
+							return m.ConfigSet(ctx, "maxmemory-policy", policy.(string)).Err()
+						}
+						return nil
 					})
 				})
 				for _, batch := range []int{1, 100} {
