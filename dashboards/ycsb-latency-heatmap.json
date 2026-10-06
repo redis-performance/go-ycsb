@@ -9,7 +9,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "description": "Each column is a trailing, overlapping 30s or 60s average. Each cell shows operations per second in that latency range. The exporter uses 33 finite bucket bounds from 100 microseconds to 60 seconds, plus +Inf.",
       "fieldConfig": {
-        "defaults": { "unit": "ops", "color": { "mode": "scheme" } },
+        "defaults": { "unit": "suffix:ops/s", "color": { "mode": "scheme" } },
         "overrides": []
       },
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
