@@ -69,11 +69,16 @@ func newHistogram(windows bool) *histogram {
 }
 
 func (h *histogram) Measure(latency time.Duration) {
+	h.MeasureN(latency, 1)
+}
+
+// MeasureN records n samples of latency.
+func (h *histogram) MeasureN(latency time.Duration, n int64) {
 	us := latency.Microseconds()
 	h.mu.Lock()
-	h.hist.RecordValue(us)
+	h.hist.RecordValues(us, n)
 	if h.win != nil {
-		h.win.RecordValue(us)
+		h.win.RecordValues(us, n)
 	}
 	h.mu.Unlock()
 }

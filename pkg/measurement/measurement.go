@@ -37,10 +37,19 @@ type intervalMeasurer interface {
 
 var header = []string{"Operation", "Takes(s)", "Count", "OPS", "Avg(us)", "Min(us)", "Max(us)", "50th(us)", "90th(us)", "95th(us)", "99th(us)", "99.9th(us)", "99.99th(us)"}
 
+// measureEvent is one slot of the 1M-slot measure channel. Its size is the
+// channel's memory: the start is Unix nanoseconds, not a time.Time (24
+// bytes), so that with n it is 40 bytes, not the 48 it was without n.
 type measureEvent struct {
-	op    string
-	start time.Time
-	lan   time.Duration
+	op      string
+	startNs int64
+	lan     time.Duration
+	n       int64 // samples of lan this event stands for
+}
+
+// countMeasurer is a Measurer that records n samples of one latency at once.
+type countMeasurer interface {
+	MeasureN(op string, start time.Time, latency time.Duration, n int64)
 }
 
 type measurement struct {
@@ -56,8 +65,18 @@ var measureChan chan measureEvent
 var measureWg sync.WaitGroup
 var measureOnce sync.Once
 
-func (m *measurement) measure(op string, start time.Time, lan time.Duration) {
-	m.measurer.Measure(op, start, lan)
+func (m *measurement) measure(op string, start time.Time, lan time.Duration, n int64) {
+	if n == 1 {
+		m.measurer.Measure(op, start, lan)
+		return
+	}
+	if cm, ok := m.measurer.(countMeasurer); ok {
+		cm.MeasureN(op, start, lan, n)
+		return
+	}
+	for i := int64(0); i < n; i++ {
+		m.measurer.Measure(op, start, lan)
+	}
 }
 
 func (m *measurement) output() {
@@ -125,16 +144,24 @@ func InitMeasure(p *properties.Properties) {
 	default:
 		panic("unsupported measurement type: " + measurementType)
 	}
-	EnableWarmUp(p.GetInt64(prop.WarmUpTime, 0) > 0)
+	EnableWarmUp(startsInWarmUp(p))
 
 	measureChan = make(chan measureEvent, 1000000) // tune size if needed
 	measureWg.Add(1)
 	go func() {
 		defer measureWg.Done()
 		for ev := range measureChan {
-			globalMeasure.measure(ev.op, ev.start, ev.lan)
+			globalMeasure.measure(ev.op, time.Unix(0, ev.startNs), ev.lan, ev.n)
 		}
 	}()
+}
+
+// startsInWarmUp says whether a run starts in warm-up: with warmuptime set,
+// except a load, which has no warm-up (Client.Run ends it at once). Starting
+// one anyway would drop a load's first samples and, as the workers count no
+// operation during a warm-up, make them insert past insertstart+insertcount.
+func startsInWarmUp(p *properties.Properties) bool {
+	return p.GetInt64(prop.WarmUpTime, 0) > 0 && p.GetBool(prop.DoTransactions, true)
 }
 
 // ReportInterval is the reporting interval (prop.LogInterval).
@@ -194,9 +221,16 @@ func IsWarmUpFinished() bool {
 
 // Measure measures the operation.
 func Measure(op string, start time.Time, lan time.Duration) {
-	if IsWarmUpFinished() {
+	MeasureN(op, start, lan, 1)
+}
+
+// MeasureN measures n operations that took lan each, e.g. the records of a
+// batch, which all completed with the batch: they count as n operations (in
+// Count and OPS), each with the batch's latency, at the cost of one sample.
+func MeasureN(op string, start time.Time, lan time.Duration, n int64) {
+	if n > 0 && IsWarmUpFinished() {
 		// Retry until we can send to the channel
-		measureChan <- measureEvent{op, start, lan}
+		measureChan <- measureEvent{op, start.UnixNano(), lan, n}
 	}
 }
 
