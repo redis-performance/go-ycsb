@@ -13,7 +13,8 @@ Allow enough local resources to compile the Go binary and run the local stack.
 YCSB_DEMO_VERSION="$(git describe --always --dirty)" docker compose -f demo/compose.yaml up --build -d
 ```
 
-Open [the dashboard](http://127.0.0.1:3000/d/ycsb-latency-heatmap/ycsb-live-latency-distribution?var-DS_PROMETHEUS=demo-prometheus&var-job=go-ycsb&var-instance=ycsb%3A9464&var-op=READ&var-window=30s&from=now-5m&to=now).
+Open [the dashboard](http://127.0.0.1:3000/d/ycsb-latency-heatmap/ycsb-live-latency-distribution?var-DS_PROMETHEUS=demo-prometheus&var-job=go-ycsb&var-instance=ycsb%3A9464&var-op=READ&var-window=30s&from=now-12m&to=now).
+Let the `ycsb` container run for at least 12 minutes to fill the sample's timeline.
 The heatmap needs two scrapes before it has data; the rolling 30s and 60s HDR
 gauges need 30 and 60 completed reporter slices. The exporter is also at
 <http://127.0.0.1:9464/metrics>, and the latest full HDR buckets are at
@@ -42,12 +43,12 @@ full-HDR minute heatmaps need a separate data-source ingestion step.
 
 This screenshot is an illustrative local run, not a Redis or go-ycsb performance
 claim. It shows READ operations, the fixed-bucket trailing-minute heatmap, and
-the packed HDR quantile panel. The sample was captured with a two-minute
+the packed HDR quantile panel. The sample was captured with a twelve-minute
 dashboard range.
 
 | Capture detail | Value |
 | --- | --- |
-| Capture time | 2026-10-07 13:40:47 UTC |
+| Capture time | 2026-10-07 13:54:04 UTC |
 | Local run ID | YCSB container `8c1fc2983b21` (started 2026-10-07 13:38:51 UTC) |
 | go-ycsb source/build | Commit `926e385`, as exported by `ycsb_info` |
 | Data node | One local Redis 8.10.2 container on an arm64 Colima VM; 10,000 keys |

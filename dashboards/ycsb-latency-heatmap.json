@@ -187,7 +187,7 @@
       }
     ]
   },
-  "time": { "from": "now-5m", "to": "now" },
+  "time": { "from": "now-12m", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
   "title": "YCSB live latency distribution",
