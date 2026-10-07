@@ -153,18 +153,27 @@ func initialGlobal(dbName string, onProperties func()) {
 // the same stop delivered twice, not a request to exit at once.
 const duplicateSignalWindow = time.Second
 
+func stopBudget(linger time.Duration) time.Duration {
+	const teardown = 10 * time.Second
+	if linger > time.Duration(1<<63-1)-teardown {
+		return time.Duration(1<<63 - 1)
+	}
+	return teardown + linger
+}
+
 // waitStop handles the stop signals: the first cancels the run, a second one
 // (unless it is the first delivered twice, within duplicateSignalWindow) or
 // forceAfter without the run closing exits at once. It returns when the run
 // closed (closeDone).
-func waitStop(sc <-chan os.Signal, closeDone <-chan struct{}, forceAfter time.Duration, now func() time.Time,
+func waitStop(sc <-chan os.Signal, closeDone <-chan struct{}, forceAfter func() time.Duration, now func() time.Time,
 	after func(time.Duration) <-chan time.Time, exit func(int)) {
 	sig := <-sc
 	first := now()
 	fmt.Printf("\nGot signal [%v] to exit.\n", sig)
 	globalCancel()
 
-	forceExit := after(forceAfter)
+	budget := forceAfter()
+	forceExit := after(budget)
 	for {
 		select {
 		case again := <-sc:
@@ -179,7 +188,7 @@ func waitStop(sc <-chan os.Signal, closeDone <-chan struct{}, forceAfter time.Du
 			exit(1)
 			return
 		case <-forceExit:
-			fmt.Printf("\nWait %v for closed, force exit\n", forceAfter)
+			fmt.Printf("\nWait %v for closed, force exit\n", budget)
 			exit(1)
 			return
 		case <-closeDone:
@@ -199,7 +208,9 @@ func main() {
 		syscall.SIGQUIT)
 
 	closeDone := make(chan struct{}, 1)
-	go waitStop(sc, closeDone, 10*time.Second, time.Now, time.After, os.Exit)
+	go waitStop(sc, closeDone, func() time.Duration {
+		return stopBudget(measurement.PrometheusLinger())
+	}, time.Now, time.After, os.Exit)
 
 	rootCmd := &cobra.Command{
 		Use:   "go-ycsb",
@@ -226,6 +237,7 @@ func main() {
 	if globalWorkload != nil {
 		globalWorkload.Close()
 	}
+	measurement.ClosePrometheus()
 
 	closeDone <- struct{}{}
 	if globalExitCode != 0 {

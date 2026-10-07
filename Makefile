@@ -31,12 +31,15 @@ endif
 
 default: build
 
+VERSION ?= $(shell git describe --tags --always --dirty --exclude 'latest-*')
+VERSION_LDFLAGS = -X github.com/pingcap/go-ycsb/pkg/measurement.Version=$(VERSION)
+
 build: export GO111MODULE=on
 build:
 ifeq ($(TAGS),)
-	$(CGO_FLAGS) go build -o bin/go-ycsb cmd/go-ycsb/*
+	$(CGO_FLAGS) go build -ldflags "$(VERSION_LDFLAGS)" -o bin/go-ycsb cmd/go-ycsb/*
 else
-	$(CGO_FLAGS) go build -tags "$(TAGS)" -o bin/go-ycsb cmd/go-ycsb/*
+	$(CGO_FLAGS) go build -tags "$(TAGS)" -ldflags "$(VERSION_LDFLAGS)" -o bin/go-ycsb cmd/go-ycsb/*
 endif
 
 check:
@@ -139,4 +142,3 @@ test-integration-cosmosdb-tls:
 # why this isn't just `go test ./...`.
 test-cosmosdb:
 	go test ./db/cosmosdb/...
-

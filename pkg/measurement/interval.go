@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	hdrhistogram "github.com/HdrHistogram/hdrhistogram-go"
@@ -83,12 +84,19 @@ type IntervalRecord struct {
 // time: mu is held across a cut and the write of its records, so the ticker and
 // the final interval at the end of the run can't interleave.
 type intervals struct {
-	mu    sync.Mutex
-	start time.Time // measurement start: when warm-up ended
-	last  time.Time // end of the previous interval
-	out   *bufio.Writer
-	file  *os.File
-	err   error // the first write error; later writes are skipped
+	mu     sync.Mutex
+	latest atomic.Pointer[intervalSnapshot]
+	start  time.Time // measurement start: when warm-up ended
+	last   time.Time // end of the previous interval
+	out    *bufio.Writer
+	file   *os.File
+	err    error // the first write error; later writes are skipped
+}
+
+type intervalSnapshot struct {
+	records []IntervalRecord
+	windowS float64
+	end     time.Time
 }
 
 // startIntervals starts the intervals at now: the end of warm-up. Samples
@@ -160,15 +168,21 @@ func (h *histograms) cutIntervalLocked(now time.Time) []IntervalRecord {
 	return recs
 }
 
-// writeInterval cuts an interval and appends its records to the output file
-// and flushes them. Without an output file there are no windows to cut.
+// writeInterval cuts an interval and publishes its records for scrapes, then
+// appends them to the output file when one is configured.
 func (h *histograms) writeInterval(now time.Time) {
 	h.iv.mu.Lock()
 	defer h.iv.mu.Unlock()
-	if h.iv.out == nil || h.iv.err != nil || h.iv.start.IsZero() { // no file, a failed one, or still in warm-up
+	if !h.windows || h.iv.start.IsZero() {
 		return
 	}
+	windowS := now.Sub(h.iv.last).Seconds()
 	recs := h.cutIntervalLocked(now)
+	h.iv.latest.Store(&intervalSnapshot{records: recs, windowS: windowS, end: now})
+	// Keep publishing scrape windows even after interval file output fails.
+	if h.iv.out == nil || h.iv.err != nil {
+		return
+	}
 	enc := json.NewEncoder(h.iv.out)
 	for i := range recs {
 		if err := enc.Encode(&recs[i]); err != nil {

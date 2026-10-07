@@ -168,6 +168,9 @@ const (
 	// MeasurementIntervalOutputFile, when set, gets one JSON line per operation
 	// per reporting interval (histogram measurement only).
 	MeasurementIntervalOutputFile = "measurement.interval_output_file"
+	MeasurementPrometheusListen   = "measurement.prometheus_listen"
+	MeasurementPrometheusLabels   = "measurement.prometheus_labels"
+	MeasurementPrometheusLinger   = "measurement.prometheus_linger"
 
 	MeasurementType          = "measurementtype"
 	MeasurementTypeDefault   = "histogram"

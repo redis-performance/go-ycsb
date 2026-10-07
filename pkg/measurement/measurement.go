@@ -127,6 +127,10 @@ func InitMeasure(p *properties.Properties) {
 	if err := checkIntervalFile(intervalFile, p); err != nil {
 		util.Fatalf("%v", err)
 	}
+	promConfig, err := parsePromConfig(p)
+	if err != nil {
+		util.Fatalf("%v", err)
+	}
 	switch measurementType {
 	case "histogram":
 		h := InitHistograms(p)
@@ -135,10 +139,20 @@ func InitMeasure(p *properties.Properties) {
 				util.Fatalf("%v", err)
 			}
 		}
+		if promConfig.listen != "" {
+			h.windows = true
+			h.prometheus = true
+			if err := startPrometheus(promConfig, h, p); err != nil {
+				util.Fatalf("%v", err)
+			}
+		}
 		globalMeasure.measurer = h
 	case "raw", "csv":
 		if intervalFile != "" {
 			util.Fatalf("%s needs %s=histogram", prop.MeasurementIntervalOutputFile, prop.MeasurementType)
+		}
+		if promConfig.listen != "" {
+			util.Fatalf("%s needs %s=histogram", prop.MeasurementPrometheusListen, prop.MeasurementType)
 		}
 		globalMeasure.measurer = InitCSV()
 	default:
@@ -197,6 +211,7 @@ func Output() error {
 	}
 	globalMeasure.measurer.GenerateExtendedOutputs()
 	globalMeasure.output()
+	SetPhaseRunning(false)
 	return err
 }
 

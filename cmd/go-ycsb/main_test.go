@@ -48,7 +48,7 @@ func startStop(t *testing.T, forceAfter time.Duration) *stopHarness {
 		return h.force
 	}
 	go func() {
-		waitStop(h.sc, h.closeDone, forceAfter, now, after, func(code int) { h.exited <- code })
+		waitStop(h.sc, h.closeDone, func() time.Duration { return forceAfter }, now, after, func(code int) { h.exited <- code })
 		close(h.done)
 	}()
 	return h
@@ -158,5 +158,14 @@ func TestWaitStopForceExit(t *testing.T) {
 	out, _ := io.ReadAll(r)
 	if !strings.Contains(string(out), "Wait 7s for closed, force exit") {
 		t.Errorf("output %q does not say how long it waited", out)
+	}
+}
+
+func TestStopBudgetIncludesFinalScrapeLinger(t *testing.T) {
+	if got := stopBudget(15 * time.Second); got != 25*time.Second {
+		t.Errorf("stop budget = %v, want 25s", got)
+	}
+	if got := stopBudget(time.Duration(1<<63 - 1)); got != time.Duration(1<<63-1) {
+		t.Errorf("stop budget overflowed: %v", got)
 	}
 }
