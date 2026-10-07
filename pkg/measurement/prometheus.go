@@ -182,7 +182,7 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 		c.hdrDropped = desc("ycsb_hdr_window_dropped_operations", "Operations omitted from the HDR window due to count overflow.", "op", "window")
 		c.hdrLatency = desc("ycsb_hdr_window_latency_seconds", "HDR latency quantile in the last completed window, in seconds.", "op", "window", "quantile")
 		c.hdrCoverage = desc("ycsb_hdr_window_covered_seconds", "Actual duration covered by the completed HDR slices.", "op", "window")
-		c.hdrValid = desc("ycsb_hdr_window_coverage_valid", "One when the completed HDR slices cover the target window within 0.5s and no slice exceeds 1.5s; zero otherwise.", "op", "window")
+		c.hdrValid = desc("ycsb_hdr_window_coverage_valid", "One when all expected HDR slices are present, each lasts 0.5s to 1.5s, total duration is within 0.5s of the target, and no samples were dropped; zero otherwise.", "op", "window")
 		c.hdrEnd = desc("ycsb_hdr_window_end_timestamp_seconds", "End of the last completed HDR window, Unix seconds.", "op", "window")
 	}
 	return c

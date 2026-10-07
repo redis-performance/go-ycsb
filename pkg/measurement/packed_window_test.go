@@ -175,6 +175,45 @@ func TestPackedMinuteFileReportsInvalidCoverageAndFinalPartialWindow(t *testing.
 	}
 }
 
+func TestPackedMinuteFileUsesSliceCountDespiteTickerJitter(t *testing.T) {
+	p := properties.NewProperties()
+	path := filepath.Join(t.TempDir(), "minutes.jsonl")
+	p.Set(prop.MeasurementHDRMinuteOutputFile, path)
+	h := InitHistograms(p)
+	h.windows, h.packedWindows = true, true
+	if err := h.openHDRMinutes(path); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(3500, 0)
+	h.IntervalStart(start)
+	for i := 1; i <= 61; i++ {
+		h.Measure("READ", start, time.Millisecond)
+		end := start.Add(time.Duration(i) * time.Second)
+		if i == 60 {
+			end = end.Add(-5 * time.Millisecond)
+		}
+		h.IntervalTick(end)
+	}
+	if err := h.IntervalClose(start.Add(61500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("minute lines = %d, want 1", len(lines))
+	}
+	var minute HDRWindowRecord
+	if err := json.Unmarshal([]byte(lines[0]), &minute); err != nil {
+		t.Fatal(err)
+	}
+	if minute.Count != 60 || !minute.CoverageValid || minute.End != start.Add(60*time.Second-5*time.Millisecond).UTC() {
+		t.Errorf("jittered minute snapshot = %+v", minute)
+	}
+}
+
 func TestPackedMinuteFileFailureIsReturned(t *testing.T) {
 	p := properties.NewProperties()
 	path := filepath.Join(t.TempDir(), "minutes.jsonl")
@@ -192,5 +231,18 @@ func TestPackedMinuteFileFailureIsReturned(t *testing.T) {
 	}
 	if err := h.IntervalClose(start.Add(time.Minute)); err == nil {
 		t.Fatal("closed minute file did not fail the run")
+	}
+}
+
+func TestPackedMinuteQueueOverflowIsReported(t *testing.T) {
+	h := InitHistograms(properties.NewProperties())
+	h.iv.hdrMinuteCh = make(chan []HDRWindowRecord, 1)
+	h.iv.hdrMinuteCh <- nil
+	h.iv.hdrMinuteTicks = packedWindowSlots - 1
+	h.iv.mu.Lock()
+	h.writeHDRMinuteLocked(nil)
+	h.iv.mu.Unlock()
+	if h.iv.hdrMinuteErr == nil || !strings.Contains(h.iv.hdrMinuteErr.Error(), "queue is full") {
+		t.Fatalf("queue overflow error = %v", h.iv.hdrMinuteErr)
 	}
 }

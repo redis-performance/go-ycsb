@@ -84,19 +84,19 @@ type IntervalRecord struct {
 // time: mu is held across a cut and the write of its records, so the ticker and
 // the final interval at the end of the run can't interleave.
 type intervals struct {
-	mu            sync.Mutex
-	latest        atomic.Pointer[intervalSnapshot]
-	start         time.Time // measurement start: when warm-up ended
-	last          time.Time // end of the previous interval
-	out           *bufio.Writer
-	file          *os.File
-	err           error // the first write error; later writes are skipped
-	hdrMinuteFile *os.File
-	hdrMinuteOut  *bufio.Writer
-	hdrMinuteErr  error
-	hdrMinuteLast time.Time
-	hdrMinuteCh   chan []HDRWindowRecord
-	hdrMinuteDone chan struct{}
+	mu             sync.Mutex
+	latest         atomic.Pointer[intervalSnapshot]
+	start          time.Time // measurement start: when warm-up ended
+	last           time.Time // end of the previous interval
+	out            *bufio.Writer
+	file           *os.File
+	err            error // the first write error; later writes are skipped
+	hdrMinuteFile  *os.File
+	hdrMinuteOut   *bufio.Writer
+	hdrMinuteErr   error
+	hdrMinuteTicks uint64
+	hdrMinuteCh    chan []HDRWindowRecord
+	hdrMinuteDone  chan struct{}
 }
 
 type intervalSnapshot struct {
@@ -113,7 +113,7 @@ func (h *histograms) startIntervals(now time.Time) {
 	h.iv.mu.Lock()
 	defer h.iv.mu.Unlock()
 	h.iv.start, h.iv.last = now, now
-	h.iv.hdrMinuteLast = now
+	h.iv.hdrMinuteTicks = 0
 }
 
 // cutInterval ends the current interval at now and returns one record per
@@ -185,6 +185,10 @@ func (h *histograms) cutIntervalLocked(now time.Time) ([]IntervalRecord, []HDRWi
 // writeInterval cuts an interval and publishes its records for scrapes, then
 // appends them to the output file when one is configured.
 func (h *histograms) writeInterval(now time.Time) {
+	h.writeIntervalAt(now, false)
+}
+
+func (h *histograms) writeIntervalAt(now time.Time, final bool) {
 	h.iv.mu.Lock()
 	defer h.iv.mu.Unlock()
 	if !h.windows || h.iv.start.IsZero() {
@@ -193,7 +197,9 @@ func (h *histograms) writeInterval(now time.Time) {
 	windowS := now.Sub(h.iv.last).Seconds()
 	recs, hdrRecords := h.cutIntervalLocked(now)
 	h.iv.latest.Store(&intervalSnapshot{records: recs, hdr: hdrRecords, windowS: windowS, end: now})
-	h.writeHDRMinuteLocked(hdrRecords, now)
+	if !final {
+		h.writeHDRMinuteLocked(hdrRecords)
+	}
 	// Keep publishing scrape windows even after interval file output fails.
 	if h.iv.out == nil || h.iv.err != nil {
 		return

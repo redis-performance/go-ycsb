@@ -157,7 +157,7 @@ func (h *histograms) IntervalTick(now time.Time) { h.writeInterval(now) }
 // IntervalClose writes the last (partial) interval and closes the file. It
 // returns the first error the interval output file hit.
 func (h *histograms) IntervalClose(now time.Time) error {
-	h.writeInterval(now)
+	h.writeIntervalAt(now, true)
 	intervalErr := h.closeIntervals()
 	minuteErr := h.closeHDRMinutes()
 	if intervalErr != nil {

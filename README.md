@@ -190,7 +190,7 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
 |measurement.prometheus_labels|""|Comma-separated constant labels (`k=v`) on every exported metric, for example `phase=load`; names and values are validated|
 |measurement.prometheus_linger|1s|How long to serve final counts after the command finishes, as a non-negative Go duration|
 |measurement.prometheus_hdr_windows|false|With the Prometheus exporter and `measurement.interval=1s`, retain 60 packed HDR interval slices and publish rolling 30s/60s quantiles and distributions|
-|measurement.hdr_minute_output_file|""|With packed HDR windows enabled, write one full HDR distribution per operation after each elapsed minute as JSONL|
+|measurement.hdr_minute_output_file|""|With packed HDR windows enabled, write one full HDR distribution per operation after every 60 reporter slices as JSONL|
 
 ### Prometheus exporter
 
@@ -269,7 +269,7 @@ do not apply `rate()` to them.
 counts (`value_us`, `count`). The bucket arrays are built only when the endpoint is read; frequent polling can
 delay the one-second reporter cuts. Add
 `-p measurement.hdr_minute_output_file=minutes.jsonl` to keep a full 60-slice HDR distribution per operation
-after each elapsed minute. These are periodic rolling snapshots: a missed reporter tick cannot reconstruct a
+after every 60 reporter slices. These are periodic rolling snapshots: a missed reporter tick cannot reconstruct a
 missing minute column. The file omits the final incomplete minute; a delayed tick can produce a snapshot with
 invalid coverage, exposed by `coverage_valid` and `covered_seconds`. The minute file uses a bounded background
 writer; a full queue or file error fails the run on close instead of silently losing a record.

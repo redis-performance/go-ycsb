@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/pingcap/go-ycsb/pkg/prop"
 )
@@ -32,17 +31,17 @@ func (h *histograms) openHDRMinutes(path string) error {
 	return nil
 }
 
-// writeHDRMinuteLocked queues the completed 60-slice distribution at each
-// minute boundary. Disk writes happen on a separate goroutine, so a slow
+// writeHDRMinuteLocked queues the completed 60-slice distribution every 60
+// reporter ticks. Disk writes happen on a separate goroutine, so a slow
 // output file cannot hold up the interval reporter.
-func (h *histograms) writeHDRMinuteLocked(records []HDRWindowRecord, end time.Time) {
+func (h *histograms) writeHDRMinuteLocked(records []HDRWindowRecord) {
 	if h.iv.hdrMinuteCh == nil {
 		return
 	}
-	if end.Sub(h.iv.hdrMinuteLast) < time.Minute || h.iv.hdrMinuteErr != nil {
+	h.iv.hdrMinuteTicks++
+	if h.iv.hdrMinuteTicks%packedWindowSlots != 0 || h.iv.hdrMinuteErr != nil {
 		return
 	}
-	h.iv.hdrMinuteLast = end
 	minuteRecords := make([]HDRWindowRecord, 0, len(records)/2)
 	for i := range records {
 		if records[i].WindowSeconds == packedWindowSlots {
