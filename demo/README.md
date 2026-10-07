@@ -7,7 +7,7 @@ Grafana dashboard. Its traffic is illustrative; it is not a performance result.
 From the repository root:
 
 You need a running Docker Engine and Docker Compose v2 (`docker compose`).
-Allow enough local resources to compile the Go binary and run four containers.
+Allow enough local resources to compile the Go binary and run the local stack.
 
 ```sh
 YCSB_DEMO_VERSION="$(git describe --always --dirty)" docker compose -f demo/compose.yaml up --build -d
@@ -41,6 +41,16 @@ full-HDR minute heatmaps need a separate data-source ingestion step.
 ![Live Redis latency heatmap in Grafana](sample-heatmap.png)
 
 This screenshot is an illustrative local run, not a Redis or go-ycsb performance
-claim. It includes the fixed-bucket minute heatmap and the packed HDR quantile
-panel. Run identity, build, node type, error count, and profiling status are
-recorded below after capture.
+claim. It shows READ operations, the fixed-bucket trailing-minute heatmap, and
+the packed HDR quantile panel. The sample was captured with a two-minute
+dashboard range.
+
+| Capture detail | Value |
+| --- | --- |
+| Capture time | 2026-10-07 13:40:47 UTC |
+| Local run ID | YCSB container `8c1fc2983b21` (started 2026-10-07 13:38:51 UTC) |
+| go-ycsb source/build | Commit `926e385`, as exported by `ycsb_info` |
+| Data node | One local Redis 8.10.2 container on an arm64 Colima VM; 10,000 keys |
+| Neptune operator build | N/A; no Neptune cluster was used |
+| Errors | 0 READ and 0 UPDATE run-phase errors; separate load container exited 0 |
+| Profiled | No |

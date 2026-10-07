@@ -9,3 +9,4 @@ PATENTS
 *.key
 **/*.pem
 **/*.key
+demo/*.png
