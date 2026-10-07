@@ -19,3 +19,4 @@ tool/tool
 .cosmosdb-it
 .cosmosdb-tls-it
 .env
+demo/captures/

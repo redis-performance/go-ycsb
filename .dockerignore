@@ -10,3 +10,4 @@ PATENTS
 **/*.pem
 **/*.key
 demo/*.png
+demo/captures/

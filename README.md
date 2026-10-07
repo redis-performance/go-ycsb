@@ -260,6 +260,10 @@ reporter then merges recent slots and publishes HDR quantiles. There is no extra
 worker or measurement path. The `30s`/`60s` names are target durations; a late reporter tick can make a slice
 longer than one second. Check `ycsb_hdr_window_coverage_valid` and `ycsb_hdr_window_covered_seconds` before
 treating a value as a 30s or 60s time window. The dashboard hides HDR quantiles while coverage is invalid.
+Use these properties on both `load` and `run` to capture both phases. Give each
+phase its own Prometheus job or `phase` label, and a different
+`measurement.hdr_minute_output_file` path so the load snapshots are not replaced
+by the run snapshots. The [local demo](demo/README.md) does both.
 In this mode the cumulative status line is printed every 10 interval ticks, after the cut, to avoid delaying
 each one-second HDR slice; interval files and HDR snapshots still update every tick.
 The final partial interval is included in the latest snapshot. These metrics are gauges for completed windows;

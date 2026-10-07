@@ -3,6 +3,9 @@ global:
   scrape_timeout: 800ms
 
 scrape_configs:
-  - job_name: go-ycsb
+  - job_name: go-ycsb-load
+    static_configs:
+      - targets: ["load:9464"]
+  - job_name: go-ycsb-run
     static_configs:
       - targets: ["ycsb:9464"]
