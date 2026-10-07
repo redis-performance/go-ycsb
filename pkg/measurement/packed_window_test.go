@@ -229,8 +229,11 @@ func TestPackedMinuteFileFailureIsReturned(t *testing.T) {
 	if err := h.iv.hdrMinuteFile.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.IntervalClose(start.Add(time.Minute)); err == nil {
-		t.Fatal("closed minute file did not fail the run")
+	for i := 1; i <= packedWindowSlots; i++ {
+		h.IntervalTick(start.Add(time.Duration(i) * time.Second))
+	}
+	if err := h.IntervalClose(start.Add(time.Minute + time.Millisecond)); err == nil || !strings.Contains(err.Error(), "write") {
+		t.Fatalf("minute writer error = %v, want a write failure", err)
 	}
 }
 
