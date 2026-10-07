@@ -248,10 +248,11 @@ available separately. At 1s scraping, this histogram contributes 36 samples per 
 is needed in go-ycsb for this heatmap. The dashboard refreshes every 5s by default; Grafana's default minimum
 refresh interval is 5s, so a 1s dashboard refresh requires changing that Grafana setting.
 
-Future packed HDR windows need more than `PackedHistogram` recording support: the type merged in
-[hdrhistogram-go PR #75](https://github.com/HdrHistogram/hdrhistogram-go/pull/75) has no reset, merge or sparse
-iteration API for combining 1s slices into a 30s/60s HDR snapshot. Keep the cumulative Prometheus histogram as a
-counter; a rolling HDR distribution would need a separate representation and an off-recording-path merge.
+The packed HDR APIs for a separate 1s-slice ring are now upstream: [PR #81](https://github.com/HdrHistogram/hdrhistogram-go/pull/81)
+added `Reset`, `ForEachBucket`, `MergeInto` and `MergeFrom`, and [PR #82](https://github.com/HdrHistogram/hdrhistogram-go/pull/82)
+added packed-to-packed `Merge` and `Compact`. A rolling HDR distribution can use a dense active slice, packed
+completed slices and an off-recording-path merge. This exporter still uses the cumulative Prometheus histogram for
+its heatmap; its `hdrhistogram-go` dependency remains pinned to v1.1.2 until the rolling feature is integrated.
 
 `TOTAL` repeats successful per-operation samples, and `BATCH_*` measures batch calls; keep these separate from
 record-level operations when aggregating distributions.
