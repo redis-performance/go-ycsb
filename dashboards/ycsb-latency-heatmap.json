@@ -64,6 +64,56 @@
       ],
       "title": "Rolling latency estimates · $op · $window",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Estimated counts from fixed Prometheus latency buckets over trailing 1m windows. The minimum query step is 1m; Grafana may use a coarser step for long ranges. Full HDR minute snapshots require a separate heatmap data source.",
+      "fieldConfig": { "defaults": { "unit": "suffix:ops", "color": { "mode": "scheme" } }, "overrides": [] },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 20 },
+      "id": 3,
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64 },
+        "dataFormat": "tsbuckets",
+        "legend": { "show": true },
+        "tooltip": { "show": true },
+        "yAxis": { "axisPlacement": "left", "unit": "s" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (le) (increase(ycsb_latency_seconds_bucket{job=~\"$job\",instance=~\"$instance\",op=\"$op\"}[1m]))",
+          "format": "heatmap",
+          "interval": "1m",
+          "legendFormat": "{{le}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Latency distribution by minute · $op",
+      "type": "heatmap"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "HDR quantiles from completed packed slices when measurement.prometheus_hdr_windows=true. Invalid coverage is hidden; check ycsb_hdr_window_covered_seconds for reporter drift.",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "ycsb_hdr_window_latency_seconds{job=~\"$job\",instance=~\"$instance\",op=\"$op\",window=\"$window\",quantile=~\"0.5|0.99\"} and ignoring(quantile) (ycsb_hdr_window_coverage_valid{job=~\"$job\",instance=~\"$instance\",op=\"$op\",window=\"$window\"} == 1)",
+          "legendFormat": "HDR q{{quantile}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "HDR rolling quantiles · $op · $window",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",

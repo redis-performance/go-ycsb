@@ -2,7 +2,7 @@ module github.com/pingcap/go-ycsb
 
 require (
 	cloud.google.com/go/spanner v1.57.0
-	github.com/HdrHistogram/hdrhistogram-go v1.1.2
+	github.com/HdrHistogram/hdrhistogram-go v1.3.1-0.20261007100219-3f3c858e8d9b
 	github.com/XiaoMi/pegasus-go-client v0.0.0-20181029071519-9400942c5d1c
 	github.com/apple/foundationdb/bindings/go v0.0.0-20200112054404-407dc0907f4f
 	github.com/boltdb/bolt v1.3.1

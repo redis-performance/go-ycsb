@@ -33,6 +33,7 @@ func TestParsePromConfig(t *testing.T) {
 		wantErr              bool
 	}{
 		{"valid", "phase=load,custom_label=a=b", "250ms", false},
+		{"legacy window label", "window=trial", "", false},
 		{"empty entry", "phase=load,", "", true},
 		{"missing equals", "phase", "", true},
 		{"empty value", "phase=", "", true},
@@ -65,6 +66,42 @@ func TestParsePromConfig(t *testing.T) {
 				t.Errorf("config = %+v", cfg)
 			}
 		})
+	}
+}
+
+func TestParsePromConfigHDRWindows(t *testing.T) {
+	for _, tc := range []struct {
+		name, listen, enabled, minute string
+		wantErr                       bool
+	}{
+		{"enabled", "127.0.0.1:9464", "true", "minutes.jsonl", false},
+		{"bad bool", "127.0.0.1:9464", "yes please", "", true},
+		{"no exporter", "", "true", "", true},
+		{"file without HDR", "127.0.0.1:9464", "false", "minutes.jsonl", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := properties.NewProperties()
+			p.Set(prop.MeasurementPrometheusListen, tc.listen)
+			p.Set(prop.MeasurementPrometheusHDRWindows, tc.enabled)
+			p.Set(prop.MeasurementHDRMinuteOutputFile, tc.minute)
+			cfg, err := parsePromConfig(p)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parsePromConfig() = %+v, %v; wantErr %t", cfg, err, tc.wantErr)
+			}
+			if err == nil && (!cfg.hdrWindows || cfg.hdrMinuteFile != tc.minute) {
+				t.Errorf("HDR config = %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestPackedWindowRejectsConflictingConstantLabel(t *testing.T) {
+	p := properties.NewProperties()
+	p.Set(prop.MeasurementPrometheusListen, "127.0.0.1:9464")
+	p.Set(prop.MeasurementPrometheusHDRWindows, "true")
+	p.Set(prop.MeasurementPrometheusLabels, "window=trial")
+	if _, err := parsePromConfig(p); err == nil {
+		t.Fatal("packed window label conflict was accepted")
 	}
 }
 

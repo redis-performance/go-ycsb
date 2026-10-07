@@ -189,6 +189,8 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
 |measurement.prometheus_listen|""|Serve `/metrics` at this address for `measurementtype=histogram`; empty disables the exporter. Bind to loopback or a private network: the endpoint has no authentication|
 |measurement.prometheus_labels|""|Comma-separated constant labels (`k=v`) on every exported metric, for example `phase=load`; names and values are validated|
 |measurement.prometheus_linger|1s|How long to serve final counts after the command finishes, as a non-negative Go duration|
+|measurement.prometheus_hdr_windows|false|With the Prometheus exporter and `measurement.interval=1s`, retain 60 packed HDR interval slices and publish rolling 30s/60s quantiles and distributions|
+|measurement.hdr_minute_output_file|""|With packed HDR windows enabled, write one full HDR distribution per operation after each elapsed minute as JSONL|
 
 ### Prometheus exporter
 
@@ -214,6 +216,10 @@ so bind it to loopback or another private address too.
 | `ycsb_interval_latency_avg_seconds{op}`, `ycsb_interval_latency_max_seconds{op}` | mean and max latency of that interval, in seconds |
 | `ycsb_interval_operations{op}` | samples in that interval |
 | `ycsb_interval_window_seconds`, `ycsb_interval_end_timestamp_seconds` | length and end time of that interval |
+| `ycsb_hdr_window_operations{op,window}`, `ycsb_hdr_window_dropped_operations{op,window}` | accepted and dropped counts in the latest completed packed HDR window; `window` is `30s` or `60s` |
+| `ycsb_hdr_window_latency_seconds{op,window,quantile}` | HDR p50, p90, p95, p99 and p99.9 in the completed packed window, in seconds |
+| `ycsb_hdr_window_covered_seconds{op,window}`, `ycsb_hdr_window_end_timestamp_seconds{op,window}` | actual duration represented by the retained slices and their end time |
+| `ycsb_hdr_window_coverage_valid{op,window}` | 1 when all expected slices are present, each lasted 0.5–1.5s, total coverage is within 0.5s of the target, and no count was dropped; otherwise 0 |
 
 The Prometheus histogram is updated from the same samples as the HDR histogram used for summaries. Its buckets,
 count and sum accumulate for the life of the process; `_sum` uses the original nanosecond durations, while HDR
@@ -248,11 +254,30 @@ available separately. At 1s scraping, this histogram contributes 36 samples per 
 is needed in go-ycsb for this heatmap. The dashboard refreshes every 5s by default; Grafana's default minimum
 refresh interval is 5s, so a 1s dashboard refresh requires changing that Grafana setting.
 
-The packed HDR APIs for a separate 1s-slice ring are now upstream: [PR #81](https://github.com/HdrHistogram/hdrhistogram-go/pull/81)
-added `Reset`, `ForEachBucket`, `MergeInto` and `MergeFrom`, and [PR #82](https://github.com/HdrHistogram/hdrhistogram-go/pull/82)
-added packed-to-packed `Merge` and `Compact`. A rolling HDR distribution can use a dense active slice, packed
-completed slices and an off-recording-path merge. This exporter still uses the cumulative Prometheus histogram for
-its heatmap; its `hdrhistogram-go` dependency remains pinned to v1.1.2 until the rolling feature is integrated.
+Packed HDR windows are opt-in: add `-p measurement.prometheus_hdr_windows=true` alongside the exporter listener and
+`-p measurement.interval=1s`. Each completed dense interval is moved into one of 60 reused packed slots; the
+reporter then merges recent slots and publishes HDR quantiles. There is no extra per-operation recording on the
+worker or measurement path. The `30s`/`60s` names are target durations; a late reporter tick can make a slice
+longer than one second. Check `ycsb_hdr_window_coverage_valid` and `ycsb_hdr_window_covered_seconds` before
+treating a value as a 30s or 60s time window. The dashboard hides HDR quantiles while coverage is invalid.
+In this mode the cumulative status line is printed every 10 interval ticks, after the cut, to avoid delaying
+each one-second HDR slice; interval files and HDR snapshots still update every tick.
+The final partial interval is included in the latest snapshot. These metrics are gauges for completed windows;
+do not apply `rate()` to them.
+
+`GET /hdr-windows` returns the latest 30s and 60s records as JSON, including the full non-cumulative HDR bucket
+counts (`value_us`, `count`). The bucket arrays are built only when the endpoint is read. Add
+`-p measurement.hdr_minute_output_file=minutes.jsonl` to keep a full 60-slice HDR distribution per operation
+after each elapsed minute. These are periodic rolling snapshots: a missed reporter tick cannot reconstruct a
+missing minute column. The file omits the final incomplete minute; a delayed tick can produce a snapshot with
+invalid coverage, exposed by `coverage_valid` and `covered_seconds`. The minute file uses a bounded background
+writer; a full queue or file error fails the run on close instead of silently losing a record.
+To view *historical* minute columns in Grafana from full
+HDR buckets, load this JSONL into a data source that supports heatmaps. The included Grafana dashboard has a
+minute-resolution heatmap from the 33 fixed Prometheus latency bounds, plus a live rolling heatmap. Prometheus
+`increase` estimates counts, and Grafana can use a coarser step for long ranges. It also
+plots the packed HDR p50/p99 gauges when enabled. This branch pins the upstream `master` commit with the packed
+APIs until a release is tagged.
 
 `TOTAL` repeats successful per-operation samples, and `BATCH_*` measures batch calls; keep these separate from
 record-level operations when aggregating distributions.

@@ -167,10 +167,12 @@ const (
 	LogIntervalDefault = 10 * time.Second
 	// MeasurementIntervalOutputFile, when set, gets one JSON line per operation
 	// per reporting interval (histogram measurement only).
-	MeasurementIntervalOutputFile = "measurement.interval_output_file"
-	MeasurementPrometheusListen   = "measurement.prometheus_listen"
-	MeasurementPrometheusLabels   = "measurement.prometheus_labels"
-	MeasurementPrometheusLinger   = "measurement.prometheus_linger"
+	MeasurementIntervalOutputFile   = "measurement.interval_output_file"
+	MeasurementPrometheusListen     = "measurement.prometheus_listen"
+	MeasurementPrometheusLabels     = "measurement.prometheus_labels"
+	MeasurementPrometheusLinger     = "measurement.prometheus_linger"
+	MeasurementPrometheusHDRWindows = "measurement.prometheus_hdr_windows"
+	MeasurementHDRMinuteOutputFile  = "measurement.hdr_minute_output_file"
 
 	MeasurementType          = "measurementtype"
 	MeasurementTypeDefault   = "histogram"

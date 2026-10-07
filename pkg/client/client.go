@@ -230,12 +230,22 @@ func (c *Client) Run(ctx context.Context) {
 
 		t := time.NewTicker(measurement.ReportInterval())
 		defer t.Stop()
+		packedWindows := measurement.PackedWindowsEnabled()
+		ticks := 0
 
 		for {
 			select {
 			case <-t.C:
-				measurement.Summary()
-				measurement.IntervalTick()
+				if packedWindows {
+					measurement.IntervalTick()
+					ticks++
+					if ticks%10 == 0 {
+						measurement.Summary()
+					}
+				} else {
+					measurement.Summary()
+					measurement.IntervalTick()
+				}
 			case <-measureCtx.Done():
 				return
 			}

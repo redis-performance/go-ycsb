@@ -34,6 +34,7 @@ type histogram struct {
 	// at each interval so recording never waits for the reporter's reads.
 	win   *hdrhistogram.Histogram
 	spare *hdrhistogram.Histogram
+	roll  *packedRoll
 	// promBuckets hold counts for fixed latency bounds, with an implicit +Inf
 	// bucket. They and promSumSeconds are populated only when the exporter is on.
 	promBuckets    []uint64

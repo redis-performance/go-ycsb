@@ -142,6 +142,17 @@ func InitMeasure(p *properties.Properties) {
 		if promConfig.listen != "" {
 			h.windows = true
 			h.prometheus = true
+			if promConfig.hdrWindows {
+				if interval != time.Second {
+					util.Fatalf("%s requires %s=1s", prop.MeasurementPrometheusHDRWindows, prop.LogInterval)
+				}
+				h.packedWindows = true
+				if promConfig.hdrMinuteFile != "" {
+					if err := h.openHDRMinutes(promConfig.hdrMinuteFile); err != nil {
+						util.Fatalf("%v", err)
+					}
+				}
+			}
 			if err := startPrometheus(promConfig, h, p); err != nil {
 				util.Fatalf("%v", err)
 			}
@@ -181,6 +192,14 @@ func startsInWarmUp(p *properties.Properties) bool {
 // ReportInterval is the reporting interval (prop.LogInterval).
 func ReportInterval() time.Duration {
 	return globalMeasure.interval
+}
+
+// PackedWindowsEnabled reports whether the one-second interval ticker also
+// builds packed HDR windows. The cumulative status line is less frequent in
+// this mode so it does not hold up every interval cut.
+func PackedWindowsEnabled() bool {
+	h, ok := globalMeasure.measurer.(*histograms)
+	return ok && h.packedWindows
 }
 
 // StartIntervals starts the reporting intervals; call it when warm-up ends.
