@@ -134,6 +134,10 @@ type promCollector struct {
 	h            *histograms
 	info         *prometheus.Desc
 	running      *prometheus.Desc
+	target       *prometheus.Desc
+	planned      *prometheus.Desc
+	queueDepth   *prometheus.Desc
+	queueCap     *prometheus.Desc
 	ops          *prometheus.Desc
 	errors       *prometheus.Desc
 	latencyHist  *prometheus.Desc
@@ -150,6 +154,9 @@ type promCollector struct {
 	hdrValid     *prometheus.Desc
 	hdrEnd       *prometheus.Desc
 	infoVals     []string
+	targetValue  float64
+	plannedValue float64
+	queue        <-chan measureEvent
 	phaseRunning atomic.Int64
 }
 
@@ -161,6 +168,11 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 		h:           h,
 		info:        desc("ycsb_info", "Configuration of this YCSB process.", "workload", "command", "threadcount", "batch_size", "target", "version"),
 		running:     desc("ycsb_phase_running", "One while the load or run phase is active; zero after final counts are available."),
+		target:      desc("ycsb_target_operations_per_second", "Configured operation target per second; zero means unlimited."),
+		queueDepth:  desc("ycsb_measurement_queue_depth", "Measurement events waiting in the process queue at scrape time."),
+		queueCap:    desc("ycsb_measurement_queue_capacity", "Maximum number of measurement events that can wait in the process queue."),
+		targetValue: float64(p.GetInt64(prop.Target, 0)),
+		queue:       measureChan,
 		ops:         desc("ycsb_operations_total", "Cumulative successful operations or sent batches, as counted in the final summary.", "op"),
 		errors:      desc("ycsb_errors_total", "Cumulative failed operations, as counted in the final summary.", "op"),
 		latencyHist: desc("ycsb_latency_seconds", "Cumulative latency distribution for this operation, in seconds.", "op"),
@@ -177,6 +189,13 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 			p.GetString(prop.Target, "0"), buildVersion(),
 		},
 	}
+	if p.GetString(prop.Command, "") == "load" {
+		c.planned = desc("ycsb_planned_inserts", "Configured insert count for this load phase; zero when no count is configured.")
+		c.plannedValue = float64(p.GetInt64(prop.InsertCount, p.GetInt64(prop.RecordCount, 0)))
+	}
+	if c.targetValue < 0 {
+		c.targetValue = 0
+	}
 	if h.packedWindows {
 		c.hdrCount = desc("ycsb_hdr_window_operations", "Operations in the last completed HDR window.", "op", "window")
 		c.hdrDropped = desc("ycsb_hdr_window_dropped_operations", "Operations omitted from the HDR window due to count overflow.", "op", "window")
@@ -189,7 +208,7 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 }
 
 func (c *promCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{c.info, c.running, c.ops, c.errors, c.latencyHist, c.latency,
+	for _, d := range []*prometheus.Desc{c.info, c.running, c.target, c.planned, c.queueDepth, c.queueCap, c.ops, c.errors, c.latencyHist, c.latency,
 		c.avg, c.max, c.count, c.window, c.end, c.hdrCount, c.hdrDropped, c.hdrLatency, c.hdrCoverage, c.hdrValid, c.hdrEnd} {
 		if d != nil {
 			ch <- d
@@ -203,6 +222,12 @@ func (c *promCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	metric(c.info, prometheus.GaugeValue, 1, c.infoVals...)
 	metric(c.running, prometheus.GaugeValue, float64(c.phaseRunning.Load()))
+	metric(c.target, prometheus.GaugeValue, c.targetValue)
+	if c.planned != nil {
+		metric(c.planned, prometheus.GaugeValue, c.plannedValue)
+	}
+	metric(c.queueDepth, prometheus.GaugeValue, float64(len(c.queue)))
+	metric(c.queueCap, prometheus.GaugeValue, float64(cap(c.queue)))
 
 	c.h.mu.RLock()
 	counts := make(map[string]int64, len(c.h.histograms))

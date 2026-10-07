@@ -210,6 +210,9 @@ so bind it to loopback or another private address too.
 |---|---|
 | `ycsb_info{workload,command,threadcount,batch_size,target,version}` | process configuration; value 1 |
 | `ycsb_phase_running` | 1 from the start of `Client.Run`, 0 after final counts are drained and printed |
+| `ycsb_target_operations_per_second` | configured numeric `target`; zero means unlimited |
+| `ycsb_planned_inserts` | configured load-phase `insertcount`, or `recordcount` when `insertcount` is absent; zero when no count is configured |
+| `ycsb_measurement_queue_depth`, `ycsb_measurement_queue_capacity` | queued measurement events and queue capacity at scrape time; a sustained high fill can make worker sends wait |
 | `ycsb_operations_total{op}`, `ycsb_errors_total{op}` | cumulative counts from the same histograms as the final summary; batches and failed records follow the Counting rules above |
 | `ycsb_latency_seconds_bucket{op,le}`, `ycsb_latency_seconds_sum{op}`, `ycsb_latency_seconds_count{op}` | cumulative Prometheus histogram for each raw operation name, including `READ_ERROR` and other failures; fixed bucket bounds span 100 µs to 60 s, plus `+Inf` |
 | `ycsb_interval_latency_seconds{op,quantile}` | p50, p90, p95, p99 and p99.9 of the last completed interval, in seconds |

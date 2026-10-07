@@ -131,6 +131,7 @@ func InitMeasure(p *properties.Properties) {
 	if err != nil {
 		util.Fatalf("%v", err)
 	}
+	measureChan = make(chan measureEvent, 1000000) // tune size if needed
 	switch measurementType {
 	case "histogram":
 		h := InitHistograms(p)
@@ -171,7 +172,6 @@ func InitMeasure(p *properties.Properties) {
 	}
 	EnableWarmUp(startsInWarmUp(p))
 
-	measureChan = make(chan measureEvent, 1000000) // tune size if needed
 	measureWg.Add(1)
 	go func() {
 		defer measureWg.Done()

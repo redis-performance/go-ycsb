@@ -144,6 +144,10 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	p.Set(prop.Workload, "core")
 	p.Set(prop.Command, "load")
 	p.Set(prop.ThreadCount, "4")
+	p.Set(prop.Target, "80")
+	p.Set(prop.RecordCount, "100")
+	p.Set(prop.InsertStart, "10")
+	p.Set(prop.InsertCount, "90")
 	h := InitHistograms(p)
 	h.windows = true
 	h.prometheus = true
@@ -157,6 +161,10 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	h.writeInterval(start.Add(time.Second))
 
 	c := newPromCollector(h, p)
+	queue := make(chan measureEvent, 4)
+	queue <- measureEvent{}
+	queue <- measureEvent{}
+	c.queue = queue
 	c.phaseRunning.Store(1)
 	e := &promExporter{collector: c}
 	handler, err := e.handler(prometheus.Labels{"phase": "load"})
@@ -197,6 +205,10 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 		"ycsb_interval_window_seconds{":             1,
 		"ycsb_interval_end_timestamp_seconds{":      1001,
 		"ycsb_phase_running{":                       1,
+		"ycsb_target_operations_per_second{":        80,
+		"ycsb_planned_inserts{":                     90,
+		"ycsb_measurement_queue_depth{":             2,
+		"ycsb_measurement_queue_capacity{":          4,
 	} {
 		if got := metricValue(t, body, prefix); got != want {
 			t.Errorf("%s = %v, want %v", prefix, got, want)
