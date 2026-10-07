@@ -261,9 +261,10 @@ worker or measurement path. The `30s`/`60s` names are target durations; a late r
 longer than one second. Check `ycsb_hdr_window_coverage_valid` and `ycsb_hdr_window_covered_seconds` before
 treating a value as a 30s or 60s time window. The dashboard hides HDR quantiles while coverage is invalid.
 Use these properties on both `load` and `run` to capture both phases. Give each
-phase its own Prometheus job or `phase` label, and a different
-`measurement.hdr_minute_output_file` path so the load snapshots are not replaced
-by the run snapshots. The [local demo](demo/README.md) does both.
+phase its own Prometheus job, as the [local demo](demo/README.md) does. If you
+separate phases only with a `phase` label, add that selector to the dashboard
+queries. Use different `measurement.hdr_minute_output_file` paths so the load
+snapshots are not replaced by the run snapshots.
 In this mode the cumulative status line is printed every 10 interval ticks, after the cut, to avoid delaying
 each one-second HDR slice; interval files and HDR snapshots still update every tick.
 The final partial interval is included in the latest snapshot. These metrics are gauges for completed windows;
