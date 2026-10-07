@@ -32,8 +32,8 @@ github.com/HdrHistogram/hdrhistogram-go v1.1.2 h1:5IcZpTvzydCQeHzK4Ef/D5rrSqwxob
 github.com/HdrHistogram/hdrhistogram-go v1.1.2/go.mod h1:yDgFjdqOqDEKOvasDdhWNXYg9BVp4O+o5f6V/ehm6Oo=
 github.com/HdrHistogram/hdrhistogram-go v1.3.1-0.20261007100219-3f3c858e8d9b h1:QTncxC6ruSe58TOI0HWql6PgCEepnvVHLrFdGM1+zng=
 github.com/HdrHistogram/hdrhistogram-go v1.3.1-0.20261007100219-3f3c858e8d9b/go.mod h1:CiIeGiHSd06zjX+FypuEJ5EQ07KKtxZ+8J6hszwVQig=
-github.com/HdrHistogram/hdrhistogram-go v1.3.1-0.20261007201724-af6b2e5b5a90 h1:jwnDvjq2gaxeA7vgX0Z+ETcL4agPx/RKS1fTqZuafAo=
-github.com/HdrHistogram/hdrhistogram-go v1.3.1-0.20261007201724-af6b2e5b5a90/go.mod h1:CiIeGiHSd06zjX+FypuEJ5EQ07KKtxZ+8J6hszwVQig=
+github.com/HdrHistogram/hdrhistogram-go v1.3.1-0.20261007203401-8c2ddcc0cd1f h1:62eDfNvk/ox4F7421VKxDEhxQekSRhiWDctZs0AVNSI=
+github.com/HdrHistogram/hdrhistogram-go v1.3.1-0.20261007203401-8c2ddcc0cd1f/go.mod h1:CiIeGiHSd06zjX+FypuEJ5EQ07KKtxZ+8J6hszwVQig=
 github.com/OneOfOne/xxhash v1.2.2/go.mod h1:HSdplMjZKSmBqAxg5vPj2TmRDmfkzw+cTzAElWljhcU=
 github.com/XiaoMi/pegasus-go-client v0.0.0-20181029071519-9400942c5d1c h1:3fAhdHMhoSG57DjJ/dqLFfgD+FoooPbQH6szINbrr3k=
 github.com/XiaoMi/pegasus-go-client v0.0.0-20181029071519-9400942c5d1c/go.mod h1:KcL6D/4RZ8RAYzQ5gKI0odcdWUmCVlbQTOlWrhP71CY=
