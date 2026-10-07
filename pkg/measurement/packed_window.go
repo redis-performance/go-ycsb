@@ -8,6 +8,7 @@ import (
 
 const packedWindowSlots = 60
 
+// HDRBucket is one non-cumulative latency bucket in an HDR window snapshot.
 type HDRBucket struct {
 	ValueUs int64 `json:"value_us"`
 	Count   int64 `json:"count"`

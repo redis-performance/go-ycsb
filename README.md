@@ -266,7 +266,8 @@ The final partial interval is included in the latest snapshot. These metrics are
 do not apply `rate()` to them.
 
 `GET /hdr-windows` returns the latest 30s and 60s records as JSON, including the full non-cumulative HDR bucket
-counts (`value_us`, `count`). The bucket arrays are built only when the endpoint is read. Add
+counts (`value_us`, `count`). The bucket arrays are built only when the endpoint is read; frequent polling can
+delay the one-second reporter cuts. Add
 `-p measurement.hdr_minute_output_file=minutes.jsonl` to keep a full 60-slice HDR distribution per operation
 after each elapsed minute. These are periodic rolling snapshots: a missed reporter tick cannot reconstruct a
 missing minute column. The file omits the final incomplete minute; a delayed tick can produce a snapshot with
