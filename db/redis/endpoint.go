@@ -50,7 +50,7 @@ func (h endpointHook) DialHook(next goredis.DialHook) goredis.DialHook { return 
 
 func (h endpointHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
 	return func(ctx context.Context, cmd goredis.Cmder) error {
-		op, ok := measurement.EndpointOp(ctx)
+		op, ok := measurement.EndpointOpName(ctx)
 		if !ok || connSetup[cmd.Name()] {
 			return next(ctx, cmd)
 		}
@@ -63,7 +63,7 @@ func (h endpointHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook 
 
 func (h endpointHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []goredis.Cmder) error {
-		op, ok := measurement.EndpointOp(ctx)
+		op, ok := measurement.EndpointOpName(ctx)
 		if !ok || allConnSetup(cmds) {
 			return next(ctx, cmds)
 		}
@@ -136,7 +136,9 @@ func outcomeRank(o string) int {
 
 // clientEnded says whether the client, not the endpoint, ended a request:
 // the run's stop closed the client (go-redis's ErrClosed, or the closed
-// connection under a read) or canceled the request's context.
+// connection under a read) or canceled the request's context. go-redis also
+// closes the client of a node that left the topology a minute after it left;
+// a request still in flight there is counted here too.
 func clientEnded(err error) bool {
 	return errors.Is(err, goredis.ErrClosed) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
 }
@@ -155,10 +157,23 @@ func isRedirect(err error) bool {
 // opContext stays the outermost context, so that the contexts go-redis
 // derives from it (a dial, a pool wait) keep following the grace through its
 // AfterFunc rather than a goroutine each.
-func (r *redis) withEndpointOp(ctx context.Context, op string) context.Context {
-	if !r.endpoints {
+// The operations' labels for their requests.
+var (
+	opRead        = measurement.NewEndpointOp("READ")
+	opUpdate      = measurement.NewEndpointOp("UPDATE")
+	opInsert      = measurement.NewEndpointOp("INSERT")
+	opBatchInsert = measurement.NewEndpointOp("BATCH_INSERT")
+	opDelete      = measurement.NewEndpointOp("DELETE")
+)
+
+func (r *redis) withEndpointOp(ctx context.Context, op *measurement.EndpointOp) context.Context {
+	if !r.endpoints { // inlined: nothing but this test when the option is off
 		return ctx
 	}
+	return labelEndpointOp(ctx, op)
+}
+
+func labelEndpointOp(ctx context.Context, op *measurement.EndpointOp) context.Context {
 	if c, ok := ctx.(*opContext); ok {
 		return &opContext{measurement.WithEndpointOp(c.Context, op), c.run}
 	}
@@ -217,9 +232,11 @@ func parseClusterNodes(reply string) []measurement.EndpointInfo {
 	var info []measurement.EndpointInfo
 	at := map[string]int{}      // endpoint -> index in info
 	failed := map[string]bool{} // endpoint -> its entry is flagged fail
+	ghosts := map[string]bool{} // failed node IDs a live node replaced
 	add := func(e measurement.EndpointInfo, fail bool) {
 		if i, ok := at[e.Endpoint]; ok {
 			if failed[e.Endpoint] && !fail {
+				ghosts[info[i].NodeID] = true
 				info[i], failed[e.Endpoint] = e, false
 			}
 			return
@@ -276,5 +293,15 @@ func parseClusterNodes(reply string) []measurement.EndpointInfo {
 			add(e, fail)
 		}
 	}
-	return info
+	if len(ghosts) == 0 {
+		return info
+	}
+	// a replaced ghost's other addresses (its hostname alias) go with it
+	live := info[:0]
+	for _, e := range info {
+		if !ghosts[e.NodeID] {
+			live = append(live, e)
+		}
+	}
+	return live
 }

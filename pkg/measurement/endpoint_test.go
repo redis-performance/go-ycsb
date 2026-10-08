@@ -14,6 +14,7 @@ package measurement
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,10 +66,10 @@ func TestEndpointSeries(t *testing.T) {
 	endpoints.Store(newEndpointStats())
 	t.Cleanup(func() { endpoints.Store(nil) })
 
-	if _, ok := EndpointOp(context.Background()); ok {
+	if _, ok := EndpointOpName(context.Background()); ok {
 		t.Error("an operation on a bare context")
 	}
-	if op, _ := EndpointOp(WithEndpointOp(context.Background(), "READ")); op != "READ" {
+	if op, _ := EndpointOpName(WithEndpointOp(context.Background(), NewEndpointOp("READ"))); op != "READ" {
 		t.Errorf("EndpointOp = %q", op)
 	}
 	MeasureEndpoint(context.Background(), "10.0.0.1:6379", "READ", EndpointOK, time.Millisecond)
@@ -138,5 +139,28 @@ func TestEndpointSeries(t *testing.T) {
 	MeasureEndpoint(context.Background(), "10.0.0.1:6379", "READ", EndpointOK, time.Millisecond) // a no-op
 	if EndpointsEnabled() {
 		t.Error("enabled after reset")
+	}
+}
+
+// Past maxEndpoints, requests are recorded under otherEndpoint and each new
+// endpoint counted once in the overflow.
+func TestEndpointCap(t *testing.T) {
+	s := newEndpointStats()
+	endpoints.Store(s)
+	t.Cleanup(func() { endpoints.Store(nil) })
+	ctx := context.Background()
+	for i := 0; i < maxEndpoints+5; i++ {
+		ep := fmt.Sprintf("10.0.%d.%d:6379", i/256, i%256)
+		MeasureEndpoint(ctx, ep, "READ", EndpointOK, time.Millisecond)
+		MeasureEndpoint(ctx, ep, "READ", EndpointOK, time.Millisecond) // a known one again
+	}
+	samples, _, overflow := s.snapshot()
+	if len(samples) != maxEndpoints+1 || overflow != 5 {
+		t.Fatalf("%d series, overflow %d; want %d series and 5", len(samples), overflow, maxEndpoints+1)
+	}
+	for _, sample := range samples {
+		if sample.endpoint == otherEndpoint && sample.count != 10 {
+			t.Errorf("other: %d requests, want 10", sample.count)
+		}
 	}
 }

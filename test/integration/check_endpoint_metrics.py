@@ -79,6 +79,9 @@ def main(metrics_path, log_path, mode, endpoints, masters=""):
         if got != want:
             fail(f"{op}: {got:.0f} requests over the endpoints, want the summary's {want} (one per operation)")
         print(f"OK: endpoint metrics: {op}: {got:.0f} requests over the endpoints = summary")
+    unexpected = {o for (_, o), v in counts.items() if v and not o.endswith(OUTCOMES)} - set(summary)
+    if unexpected:
+        fail(f"requests under operations the run didn't count: {unexpected}")
     served = {e for (e, o), v in counts.items() if v and not o.endswith(OUTCOMES)}
     if mode == "cluster":
         idle = masters - served

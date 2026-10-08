@@ -307,7 +307,8 @@ are not counted.
 - `ycsb_endpoint_latency_seconds{endpoint,op}`: a histogram on the same 33 fixed bounds as `ycsb_latency_seconds`.
   `op` is the operation the request belongs to (`READ`, `UPDATE`, `INSERT`, `BATCH_INSERT`, `DELETE`), with a
   suffix for its outcome: `_ERROR` (failed, client timeouts included), `_REDIRECT` (answered `MOVED`/`ASK`) or
-  `_CANCELED` (ended by the client itself at the run's stop: client closed, context canceled). A pipeline takes its
+  `_CANCELED` (ended by the client itself at the run's stop: client closed, context canceled; also a request
+  in flight when go-redis closes the client of a node that left the topology a minute earlier). A pipeline takes its
   worst outcome: `_ERROR` if any command failed, else `_CANCELED` if the client ended any, else `_REDIRECT`. A missing key is an answer, not an
   error. Select one exact `op` for percentiles and heatmaps: the outcome series would skew them. With
   `redis.datatype=json`, reads and updates are MULTI/EXEC transactions, whose redirects and per-command errors
@@ -328,7 +329,10 @@ Percentiles come from the fixed buckets (`histogram_quantile(0.99, sum by (le, e
 (rate(ycsb_endpoint_latency_seconds_bucket{op="READ"}[30s])))`), so their resolution is that of the bounds
 (100µs, 250µs, 500µs, 750µs, 1ms, ...). Series grow with endpoints × operations × outcomes: 30 masters with
 reads and updates are about 2,000 lines per scrape, 60 endpoints with every operation and outcome about 44,000
-(about 5 MB); raise the scrape interval for large clusters. Nothing is recorded during a warm-up (a batch follows
+(about 5 MB); raise the scrape interval for large clusters. Endpoints past the first 1024 are recorded together under
+`endpoint="other"` and counted in `ycsb_endpoint_overflow_total` (series are never removed, and redirect
+targets and topology changes add endpoints). The `CLUSTER NODES` reads borrow a connection from the client's
+pool, every 30s. Nothing is recorded during a warm-up (a batch follows
 the decision the worker made when it started). A scraper that adds its own `endpoint` target label (a Prometheus
 Operator ServiceMonitor) renames this one to `exported_endpoint`. Other bindings record nothing, and the option
 costs nothing when off.

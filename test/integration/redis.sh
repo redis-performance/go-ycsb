@@ -163,10 +163,12 @@ run_endpoints() {
   ./bin/go-ycsb run redis -P workloads/workload_feature_store -p redis.mode="$mode" -p redis.addr="$addr" \
     -p recordcount="$RECORDCOUNT" -p threadcount="$THREADCOUNT" -p operationcount="$OPERATIONCOUNT" \
     -p measurement.prometheus_listen="127.0.0.1:$port" -p measurement.prometheus_endpoints=true \
-    -p measurement.prometheus_linger=30s >"$WORK/$mode-endpoints.log" 2>&1 &
+    -p measurement.prometheus_linger=5s >"$WORK/$mode-endpoints.log" 2>&1 &
   local pid=$! scraped=
   for _ in $(seq 1 1200); do
-    if curl -sf "http://127.0.0.1:$port/metrics" >"$WORK/$mode-endpoints.prom" 2>/dev/null &&
+    # python3, which the tests need anyway, rather than curl
+    if python3 -c 'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=2).read().decode())' \
+      "http://127.0.0.1:$port/metrics" >"$WORK/$mode-endpoints.prom" 2>/dev/null &&
       grep -qE '^ycsb_phase_running(\{[^}]*\})? 0$' "$WORK/$mode-endpoints.prom"; then
       scraped=1
       break
@@ -174,8 +176,15 @@ run_endpoints() {
     if ! kill -0 "$pid" 2>/dev/null; then break; fi
     sleep 0.1
   done
+  # the stop ends the run (it doesn't shorten the linger); it must still exit 0
   kill -INT "$pid" 2>/dev/null || true
-  wait "$pid" || true
+  local rc=0
+  wait "$pid" || rc=$?
+  if [ "$rc" != 0 ]; then
+    echo "FAIL: [$mode] go-ycsb exited $rc"
+    cat "$WORK/$mode-endpoints.log"
+    exit 1
+  fi
   if [ -z "$scraped" ]; then
     echo "FAIL: [$mode] no final /metrics scrape"
     cat "$WORK/$mode-endpoints.log"

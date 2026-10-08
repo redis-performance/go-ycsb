@@ -14,7 +14,7 @@ package measurement
 
 import (
 	"context"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,28 +55,114 @@ func newEndpointHist() *endpointHist {
 	return &endpointHist{buckets: make([]atomic.Uint64, len(promLatencyBucketsUs)+1)}
 }
 
+// endpointBounds are promLatencyBucketsUs as durations, for record.
+var endpointBounds = func() []time.Duration {
+	b := make([]time.Duration, len(promLatencyBucketsUs))
+	for i, us := range promLatencyBucketsUs {
+		b[i] = time.Duration(us) * time.Microsecond
+	}
+	return b
+}()
+
 func (h *endpointHist) record(lan time.Duration) {
-	i := sort.Search(len(promLatencyBucketsUs), func(i int) bool {
-		return lan <= time.Duration(promLatencyBucketsUs[i])*time.Microsecond
-	})
+	i, _ := slices.BinarySearch(endpointBounds, lan) // the first bound >= lan
 	h.buckets[i].Add(1)
 	h.sumNs.Add(int64(lan))
 }
 
-// endpointStats: the series are a copy-on-write map, read with one atomic
+// endpointStats: two levels of copy-on-write maps, each read with one atomic
 // load per request (a read lock's shared counter would be written by every
-// request thread); a new series copies it under mu, rarely after the first
-// seconds of a run.
+// request thread): the endpoints, then each endpoint's few operation and
+// outcome series. A new endpoint copies the first, a new series of an
+// endpoint only that endpoint's; both are rare after a run's first seconds.
 type endpointStats struct {
-	hists atomic.Pointer[map[endpointKey]*endpointHist]
-	mu    sync.Mutex // guards writes of hists, and info
-	info  []EndpointInfo
+	eps atomic.Pointer[map[string]*endpointSeries]
+	mu  sync.Mutex // guards writes of eps, and info
+	// overflow counts the endpoints past maxEndpoints, recorded as
+	// otherEndpoint: the server names them (redirect targets, topology
+	// changes), so their number is not the client's to bound.
+	overflow atomic.Int64
+	seen     map[string]bool // the endpoints past maxEndpoints, counted once
+	info     []EndpointInfo
 }
 
+// endpointSeries are one endpoint's series, by operation and outcome.
+type endpointSeries struct {
+	hists atomic.Pointer[map[opOutcome]*endpointHist]
+	mu    sync.Mutex // guards writes of hists
+}
+
+type opOutcome struct{ op, outcome string }
+
+// maxEndpoints bounds the endpoints with series of their own; requests to
+// endpoints past it are recorded under otherEndpoint.
+const (
+	maxEndpoints  = 1024
+	otherEndpoint = "other"
+)
+
 func newEndpointStats() *endpointStats {
-	s := &endpointStats{}
-	s.hists.Store(&map[endpointKey]*endpointHist{})
+	s := &endpointStats{seen: map[string]bool{}}
+	s.eps.Store(&map[string]*endpointSeries{})
 	return s
+}
+
+func newEndpointSeries() *endpointSeries {
+	e := &endpointSeries{}
+	e.hists.Store(&map[opOutcome]*endpointHist{})
+	return e
+}
+
+// series returns endpoint's series, created if new.
+func (s *endpointStats) series(endpoint string) *endpointSeries {
+	if e, ok := (*s.eps.Load())[endpoint]; ok {
+		return e
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := *s.eps.Load()
+	if e, ok := old[endpoint]; ok {
+		return e
+	}
+	if len(old) >= maxEndpoints {
+		if !s.seen[endpoint] {
+			s.seen[endpoint] = true
+			s.overflow.Add(1)
+		}
+		if e, ok := old[otherEndpoint]; ok {
+			return e
+		}
+		endpoint = otherEndpoint
+	}
+	m := make(map[string]*endpointSeries, len(old)+1)
+	for k, v := range old {
+		m[k] = v
+	}
+	e := newEndpointSeries()
+	m[endpoint] = e
+	s.eps.Store(&m)
+	return e
+}
+
+// hist returns the histogram of op with outcome, created if new.
+func (e *endpointSeries) hist(k opOutcome) *endpointHist {
+	if h, ok := (*e.hists.Load())[k]; ok {
+		return h
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	old := *e.hists.Load()
+	if h, ok := old[k]; ok {
+		return h
+	}
+	m := make(map[opOutcome]*endpointHist, len(old)+1)
+	for k, v := range old {
+		m[k] = v
+	}
+	h := newEndpointHist()
+	m[k] = h
+	e.hists.Store(&m)
+	return h
 }
 
 // endpoints is nil unless measurement.prometheus_endpoints is on; set by
@@ -90,17 +176,28 @@ func EndpointsEnabled() bool {
 
 type endpointOpKey struct{}
 
+// EndpointOp is an operation's label for its requests (READ, INSERT,
+// BATCH_INSERT, ...), made once (NewEndpointOp) so that labelling a request
+// allocates no copy of it.
+type EndpointOp struct{ name string }
+
+// NewEndpointOp is the label of the operation named name.
+func NewEndpointOp(name string) *EndpointOp { return &EndpointOp{name} }
+
 // WithEndpointOp labels the requests sent on ctx with the operation they are
-// part of (READ, INSERT, BATCH_INSERT, ...). A request without one, such as a
-// client's own topology refresh, is not recorded.
-func WithEndpointOp(ctx context.Context, op string) context.Context {
+// part of. A request without one, such as a client's own topology refresh,
+// is not recorded.
+func WithEndpointOp(ctx context.Context, op *EndpointOp) context.Context {
 	return context.WithValue(ctx, endpointOpKey{}, op)
 }
 
-// EndpointOp returns the operation WithEndpointOp put on ctx.
-func EndpointOp(ctx context.Context) (string, bool) {
-	op, ok := ctx.Value(endpointOpKey{}).(string)
-	return op, ok && op != ""
+// EndpointOpName returns the name of the operation WithEndpointOp put on ctx.
+func EndpointOpName(ctx context.Context) (string, bool) {
+	op, ok := ctx.Value(endpointOpKey{}).(*EndpointOp)
+	if !ok || op == nil || op.name == "" {
+		return "", false
+	}
+	return op.name, true
 }
 
 // Endpoint outcomes, appended to the operation's name.
@@ -141,22 +238,7 @@ func MeasureEndpoint(ctx context.Context, endpoint, op, outcome string, lan time
 	if s == nil || !Measured(ctx) {
 		return
 	}
-	k := endpointKey{endpoint, op, outcome}
-	h, ok := (*s.hists.Load())[k]
-	if !ok {
-		s.mu.Lock()
-		old := *s.hists.Load()
-		if h, ok = old[k]; !ok {
-			m := make(map[endpointKey]*endpointHist, len(old)+1)
-			for k, v := range old {
-				m[k] = v
-			}
-			h = newEndpointHist()
-			m[k] = h
-			s.hists.Store(&m)
-		}
-		s.mu.Unlock()
-	}
+	h := s.series(endpoint).hist(opOutcome{op, outcome})
 	h.record(lan)
 }
 
@@ -191,24 +273,25 @@ func EndpointLabel(endpoint string) string { return validUTF8(endpoint) }
 
 func validUTF8(v string) string { return strings.ToValidUTF8(v, "\uFFFD") }
 
-func (s *endpointStats) snapshot() ([]endpointSample, []EndpointInfo) {
-	hists := *s.hists.Load()
-	samples := make([]endpointSample, 0, len(hists))
-	for k, h := range hists {
-		// the count is the buckets' total, read once, so that it is never
-		// below the last finite bucket's cumulative count
-		buckets := make(map[float64]uint64, len(promLatencyBucketsUs))
-		var cumulative uint64
-		for i, upperUs := range promLatencyBucketsUs {
-			cumulative += h.buckets[i].Load()
-			buckets[float64(upperUs)/1e6] = cumulative
+func (s *endpointStats) snapshot() ([]endpointSample, []EndpointInfo, int64) {
+	var samples []endpointSample
+	for endpoint, e := range *s.eps.Load() {
+		for k, h := range *e.hists.Load() {
+			// the count is the buckets' total, read once, so that it is never
+			// below the last finite bucket's cumulative count
+			buckets := make(map[float64]uint64, len(promLatencyBucketsUs))
+			var cumulative uint64
+			for i, upperUs := range promLatencyBucketsUs {
+				cumulative += h.buckets[i].Load()
+				buckets[float64(upperUs)/1e6] = cumulative
+			}
+			cumulative += h.buckets[len(promLatencyBucketsUs)].Load()
+			samples = append(samples, endpointSample{endpoint, k.op, k.outcome, cumulative,
+				float64(h.sumNs.Load()) / 1e9, buckets})
 		}
-		cumulative += h.buckets[len(promLatencyBucketsUs)].Load()
-		samples = append(samples, endpointSample{k.endpoint, k.op, k.outcome, cumulative,
-			float64(h.sumNs.Load()) / 1e9, buckets})
 	}
 	s.mu.Lock()
 	info := s.info
 	s.mu.Unlock()
-	return samples, info
+	return samples, info, s.overflow.Load()
 }

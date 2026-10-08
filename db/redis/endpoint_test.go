@@ -296,7 +296,7 @@ func TestEndpointOutcome(t *testing.T) {
 func TestEndpointOpOff(t *testing.T) {
 	r := &redis{}
 	ctx := context.Background()
-	if got := r.withEndpointOp(ctx, "READ"); got != ctx {
+	if got := r.withEndpointOp(ctx, opRead); got != ctx {
 		t.Error("withEndpointOp wrapped the context with the option off")
 	}
 }
@@ -313,6 +313,9 @@ func TestParseClusterNodes(t *testing.T) {
 		"bbbb 10.0.0.9:7003@17003 master,fail - 0 0 7 disconnected",
 		"cccc 10.0.0.9:7003@17003 master - 0 0 8 connected 16000-16100",
 		"dddd 10.0.0.10:7004@17004 handshake - 0 0 0 connected",
+		// a ghost with a hostname alias, replaced by a live node without one
+		"eeee 10.0.0.11:7005@17005,ghost.example master,fail - 0 0 9 disconnected",
+		"ffff 10.0.0.11:7005@17005 master - 0 0 10 connected 16101-16200",
 		"",
 	}, "\n")
 	got := parseClusterNodes(reply)
@@ -324,6 +327,7 @@ func TestParseClusterNodes(t *testing.T) {
 		{Endpoint: "[2001:db8::5]:7001", NodeID: "aaaa", Role: "master", Shard: "aaaa"},
 		{Endpoint: "node-6.example:7001", NodeID: "aaaa", Role: "master", Shard: "aaaa"},
 		{Endpoint: "10.0.0.9:7003", NodeID: "cccc", Role: "master", Shard: "cccc"},
+		{Endpoint: "10.0.0.11:7005", NodeID: "ffff", Role: "master", Shard: "ffff"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseClusterNodes:\n got %+v\nwant %+v", got, want)

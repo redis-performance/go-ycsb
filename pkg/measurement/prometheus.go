@@ -174,6 +174,7 @@ type promCollector struct {
 	epErrors     *prometheus.Desc
 	epRedirects  *prometheus.Desc
 	epInfo       *prometheus.Desc
+	epOverflow   *prometheus.Desc
 	infoVals     []string
 	targetValue  float64
 	plannedValue float64
@@ -229,6 +230,7 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 		c.epLatency = desc("ycsb_endpoint_latency_seconds", "Cumulative latency of the requests sent to one server endpoint, in seconds: one request each (a pipeline is one; the node client's own retries, the pool wait and a new connection's set-up are inside it), not an operation. *_ERROR, *_REDIRECT and *_CANCELED ops are failed, redirected and client-ended requests.", "endpoint", "op")
 		c.epErrors = desc("ycsb_endpoint_errors_total", "Cumulative failed requests to one server endpoint; redirects and requests the client ended (*_CANCELED) excluded.", "endpoint", "op")
 		c.epRedirects = desc("ycsb_endpoint_redirects_total", "Cumulative requests one server endpoint answered with a redirect (MOVED or ASK).", "endpoint", "op")
+		c.epOverflow = desc("ycsb_endpoint_overflow_total", "Endpoints past the first 1024, whose requests are recorded under endpoint=\"other\".")
 		c.epInfo = desc("ycsb_endpoint_info", "One per endpoint the server reported (CLUSTER NODES): its node ID, role and shard (its master's node ID).", "endpoint", "node_id", "role", "shard")
 	}
 	return c
@@ -237,7 +239,7 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 func (c *promCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{c.info, c.running, c.target, c.planned, c.queueDepth, c.queueCap, c.ops, c.errors, c.latencyHist, c.latency,
 		c.avg, c.max, c.count, c.window, c.end, c.hdrCount, c.hdrDropped, c.hdrLatency, c.hdrCoverage, c.hdrValid, c.hdrEnd,
-		c.epLatency, c.epErrors, c.epRedirects, c.epInfo} {
+		c.epLatency, c.epErrors, c.epRedirects, c.epInfo, c.epOverflow} {
 		if d != nil {
 			ch <- d
 		}
@@ -365,7 +367,8 @@ func (c *promCollector) collectEndpoints(ch chan<- prometheus.Metric) {
 			ch <- m
 		}
 	}
-	samples, info := s.snapshot()
+	samples, info, overflow := s.snapshot()
+	emit(prometheus.NewConstMetric(c.epOverflow, prometheus.CounterValue, float64(overflow)))
 	errs := make(map[endpointKey]uint64)
 	redirects := make(map[endpointKey]uint64)
 	for _, sample := range samples {
