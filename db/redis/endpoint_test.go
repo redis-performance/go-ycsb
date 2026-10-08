@@ -371,12 +371,6 @@ func TestEndpointMetricsBatchRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := scrape()
-	for _, s := range clusterSlots {
-		addr := s.Nodes[0].Addr
-		for _, op := range []string{"BATCH_INSERT", "BATCH_INSERT_REDIRECT", "BATCH_INSERT_ERROR"} {
-			t.Logf("%s %s = %v", addr, op, got[epSeries("ycsb_endpoint_latency_seconds_count", addr, op)])
-		}
-	}
 	if n := got[epSeries("ycsb_endpoint_latency_seconds_count", owner, "BATCH_INSERT_REDIRECT")]; n != 1 {
 		t.Errorf("owner's redirected pipeline = %v, want 1", n)
 	}

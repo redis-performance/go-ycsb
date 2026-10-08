@@ -114,7 +114,6 @@ func newEndpointSeries() *endpointSeries {
 	return e
 }
 
-// series returns endpoint's series, created if new.
 func (s *endpointStats) series(endpoint string) *endpointSeries {
 	if e, ok := (*s.eps.Load())[endpoint]; ok {
 		return e
@@ -145,7 +144,6 @@ func (s *endpointStats) series(endpoint string) *endpointSeries {
 	return e
 }
 
-// hist returns the histogram of op with outcome, created if new.
 func (e *endpointSeries) hist(k opOutcome) *endpointHist {
 	if h, ok := (*e.hists.Load())[k]; ok {
 		return h

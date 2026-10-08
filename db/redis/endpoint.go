@@ -159,11 +159,6 @@ func isRedirect(err error) bool {
 	return strings.HasPrefix(msg, "MOVED ") || strings.HasPrefix(msg, "ASK ")
 }
 
-// withEndpointOp labels ctx's requests with op, only when they are timed per
-// endpoint: the label is one allocation per operation. An operation's
-// opContext stays the outermost context, so that the contexts go-redis
-// derives from it (a dial, a pool wait) keep following the grace through its
-// AfterFunc rather than a goroutine each.
 // The operations' labels for their requests.
 var (
 	opRead        = measurement.NewEndpointOp("READ")
@@ -173,6 +168,11 @@ var (
 	opDelete      = measurement.NewEndpointOp("DELETE")
 )
 
+// withEndpointOp labels ctx's requests with op, only when they are timed per
+// endpoint: the label is one allocation per operation. An operation's
+// opContext stays the outermost context, so that the contexts go-redis
+// derives from it (a dial, a pool wait) keep following the grace through its
+// AfterFunc rather than a goroutine each.
 func (r *redis) withEndpointOp(ctx context.Context, op *measurement.EndpointOp) context.Context {
 	if !r.endpoints { // inlined: nothing but this test when the option is off
 		return ctx
@@ -200,7 +200,9 @@ const endpointInfoSettle = 5 * time.Second
 const endpointInfoMinGap = 2 * time.Second
 
 // endpointInfoNow asks the refresh for a read now: a redirect means the slot
-// map, and maybe the roles, changed (a failover). It never blocks.
+// map, and maybe the roles, changed (a failover). It never blocks. It is
+// per process, as go-ycsb has one DB; with no refresh (single mode) its one
+// slot just stays full.
 var endpointInfoNow = make(chan struct{}, 1)
 
 func askEndpointInfo() {
