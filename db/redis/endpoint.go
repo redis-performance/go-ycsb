@@ -29,12 +29,21 @@ import (
 // measurement.prometheus_endpoints: in cluster mode go-redis makes one node
 // client per endpoint it learns from the cluster's topology, and this hook,
 // added to each, labels the requests with that endpoint. A request is one
-// try on one endpoint: a command redirected or retried is several, and a
-// pipeline (a batch's share of one master) is one. The time includes the
-// wait for a pool connection. Requests on a context with no operation (the
-// client's own topology refreshes) are not recorded.
+// call on the node client: a redirect or a cluster-level retry is another
+// one, a pipeline (a batch's share of one master) is one, and the node
+// client's own retries (redis.max_retries; none in cluster mode by default)
+// are inside it, backoff included. The time includes the wait for a pool
+// connection and a new connection's set-up. Requests on a context with no
+// operation (the client's own topology reads) are not recorded. A MULTI/EXEC
+// transaction's redirects and command errors are set only after the hooks
+// return, so they count as answered.
 type endpointHook struct {
 	endpoint string
+}
+
+// newEndpointHook times the requests of the node client that dials addr.
+func newEndpointHook(addr string) endpointHook {
+	return endpointHook{measurement.EndpointLabel(addr)}
 }
 
 func (h endpointHook) DialHook(next goredis.DialHook) goredis.DialHook { return next }
@@ -47,7 +56,7 @@ func (h endpointHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook 
 		}
 		start := time.Now()
 		err := next(ctx, cmd)
-		measurement.MeasureEndpoint(h.endpoint, op, endpointOutcome(err), time.Since(start))
+		measurement.MeasureEndpoint(ctx, h.endpoint, op, endpointOutcome(err), time.Since(start))
 		return err
 	}
 }
@@ -70,7 +79,7 @@ func (h endpointHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) gore
 				outcome = o
 			}
 		}
-		measurement.MeasureEndpoint(h.endpoint, op, outcome, lan)
+		measurement.MeasureEndpoint(ctx, h.endpoint, op, outcome, lan)
 		return err
 	}
 }
@@ -100,12 +109,23 @@ func endpointOutcome(errs ...error) string {
 		switch {
 		case err == nil || errors.Is(err, goredis.Nil):
 		case isRedirect(err):
-			outcome = measurement.EndpointRedirect
+			if outcome == measurement.EndpointOK {
+				outcome = measurement.EndpointRedirect
+			}
+		case clientEnded(err):
+			outcome = measurement.EndpointCanceled
 		default:
 			return measurement.EndpointError
 		}
 	}
 	return outcome
+}
+
+// clientEnded says whether the client, not the endpoint, ended a request:
+// the run's stop closed the client (go-redis's ErrClosed, or the closed
+// connection under a read) or canceled the request's context.
+func clientEnded(err error) bool {
+	return errors.Is(err, goredis.ErrClosed) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled)
 }
 
 func isRedirect(err error) bool {
@@ -118,10 +138,16 @@ func isRedirect(err error) bool {
 }
 
 // withEndpointOp labels ctx's requests with op, only when they are timed per
-// endpoint: the label is one allocation per operation.
+// endpoint: the label is one allocation per operation. An operation's
+// opContext stays the outermost context, so that the contexts go-redis
+// derives from it (a dial, a pool wait) keep following the grace through its
+// AfterFunc rather than a goroutine each.
 func (r *redis) withEndpointOp(ctx context.Context, op string) context.Context {
 	if !r.endpoints {
 		return ctx
+	}
+	if c, ok := ctx.(*opContext); ok {
+		return &opContext{measurement.WithEndpointOp(c.Context, op), c.run}
 	}
 	return measurement.WithEndpointOp(ctx, op)
 }
@@ -132,14 +158,19 @@ const endpointInfoRefresh = 30 * time.Second
 
 // refreshEndpointInfo publishes the cluster's CLUSTER NODES reply now and
 // then every endpointInfoRefresh until stop is closed. A failed read keeps
-// the last reply.
+// the last reply; only the first failure is logged (a proxy that refuses
+// CLUSTER NODES would otherwise log every 30 s).
 func refreshEndpointInfo(c *goredis.ClusterClient, stop <-chan struct{}) {
+	logged := false
 	read := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		reply, err := c.ClusterNodes(ctx).Result()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "redis: CLUSTER NODES for the endpoint metrics: %v\n", err)
+			if !logged {
+				logged = true
+				fmt.Fprintf(os.Stderr, "redis: CLUSTER NODES for the endpoint metrics (no ycsb_endpoint_info until it answers): %v\n", err)
+			}
 			return
 		}
 		measurement.SetEndpointInfo(parseClusterNodes(reply))
@@ -160,40 +191,76 @@ func refreshEndpointInfo(c *goredis.ClusterClient, stop <-chan struct{}) {
 }
 
 // parseClusterNodes reads a CLUSTER NODES reply: per line, the node ID,
-// ip:port@cport[,hostname], the flags and, for a replica, its master's node
-// ID. A node with a hostname is listed under both host:port and ip:port, as
-// the client may dial either. Nodes with no address (a failed node no longer
-// known, say) are left out.
+// ip:port@cport[,hostname[,...]], the flags and, for a replica, its master's
+// node ID. Addresses are formatted as go-redis dials them (net.JoinHostPort:
+// an IPv6 address in brackets; Redis prints it bare). A node with a hostname
+// is listed under both hostname:port and ip:port, as the client may dial
+// either. Nodes with no address, or in a handshake, are left out; when two
+// lines share an address (a node restarted with a new ID leaves a failed
+// ghost), a node not flagged fail wins. go-redis rewrites a loopback address
+// to the seed's host and a port 0 to the seed's port; such endpoints get no
+// info series.
 func parseClusterNodes(reply string) []measurement.EndpointInfo {
 	var info []measurement.EndpointInfo
+	at := map[string]int{}      // endpoint -> index in info
+	failed := map[string]bool{} // endpoint -> its entry is flagged fail
+	add := func(e measurement.EndpointInfo, fail bool) {
+		if i, ok := at[e.Endpoint]; ok {
+			if failed[e.Endpoint] && !fail {
+				info[i], failed[e.Endpoint] = e, false
+			}
+			return
+		}
+		at[e.Endpoint], failed[e.Endpoint] = len(info), fail
+		info = append(info, e)
+	}
 	for _, line := range strings.Split(reply, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 4 {
 			continue
 		}
 		id, addr, flags, master := f[0], f[1], f[2], f[3]
-		addr, hostname, _ := strings.Cut(addr, ",")
+		addr, extra, _ := strings.Cut(addr, ",")
+		hostname, _, _ := strings.Cut(extra, ",")
+		if strings.Contains(hostname, "=") { // an auxiliary field (shard-id=...), not a hostname
+			hostname = ""
+		}
 		addr, _, _ = strings.Cut(addr, "@")
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil || port == "0" {
+		i := strings.LastIndexByte(addr, ':')
+		if i < 0 {
 			continue
 		}
-		e := measurement.EndpointInfo{NodeID: id, Role: "replica", Shard: master}
+		host, port := strings.Trim(addr[:i], "[]"), addr[i+1:]
+		if port == "" || port == "0" {
+			continue
+		}
+		e := measurement.EndpointInfo{NodeID: id, Role: "unknown"}
+		fail := false
 		for _, flag := range strings.Split(flags, ",") {
-			if flag == "master" {
+			switch flag {
+			case "master":
 				e.Role, e.Shard = "master", id
+			case "slave", "replica":
+				e.Role, e.Shard = "replica", master
+			case "handshake", "noaddr":
+				e.Role = ""
+			case "fail":
+				fail = true
 			}
+		}
+		if e.Role == "" {
+			continue
 		}
 		if e.Shard == "-" {
 			e.Shard = ""
 		}
 		if host != "" {
-			e.Endpoint = addr
-			info = append(info, e)
+			e.Endpoint = net.JoinHostPort(host, port)
+			add(e, fail)
 		}
 		if hostname != "" && hostname != host {
 			e.Endpoint = net.JoinHostPort(hostname, port)
-			info = append(info, e)
+			add(e, fail)
 		}
 	}
 	return info

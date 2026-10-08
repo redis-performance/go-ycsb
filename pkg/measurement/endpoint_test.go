@@ -62,7 +62,7 @@ func TestParsePromConfigEndpoints(t *testing.T) {
 // endpoints' identities. Nothing is recorded without an operation, during a
 // warm-up, or with the option off.
 func TestEndpointSeries(t *testing.T) {
-	endpoints.Store(&endpointStats{hists: make(map[endpointKey]*endpointHist)})
+	endpoints.Store(newEndpointStats())
 	t.Cleanup(func() { endpoints.Store(nil) })
 
 	if _, ok := EndpointOp(context.Background()); ok {
@@ -71,13 +71,18 @@ func TestEndpointSeries(t *testing.T) {
 	if op, _ := EndpointOp(WithEndpointOp(context.Background(), "READ")); op != "READ" {
 		t.Errorf("EndpointOp = %q", op)
 	}
-	MeasureEndpoint("10.0.0.1:6379", "READ", EndpointOK, time.Millisecond)
-	MeasureEndpoint("10.0.0.1:6379", "READ", EndpointOK, 70*time.Second) // past the last bound
-	MeasureEndpoint("10.0.0.1:6379", "READ", EndpointError, 2*time.Millisecond)
-	MeasureEndpoint("10.0.0.2:6379", "INSERT", EndpointRedirect, 3*time.Millisecond)
+	MeasureEndpoint(context.Background(), "10.0.0.1:6379", "READ", EndpointOK, time.Millisecond)
+	MeasureEndpoint(context.Background(), "10.0.0.1:6379", "READ", EndpointOK, 70*time.Second) // past the last bound
+	MeasureEndpoint(context.Background(), "10.0.0.1:6379", "READ", EndpointError, 2*time.Millisecond)
+	MeasureEndpoint(context.Background(), "10.0.0.2:6379", "INSERT", EndpointRedirect, 3*time.Millisecond)
 	EnableWarmUp(true)
-	MeasureEndpoint("10.0.0.1:6379", "READ", EndpointOK, time.Millisecond)
+	MeasureEndpoint(context.Background(), "10.0.0.1:6379", "READ", EndpointOK, time.Millisecond)
+	// a batch the worker started after the warm-up is measured whole
+	MeasureEndpoint(WithMeasured(context.Background(), true), "10.0.0.1:6379", "READ", EndpointOK, time.Millisecond)
 	EnableWarmUp(false)
+	// and one it started during the warm-up not at all
+	MeasureEndpoint(WithMeasured(context.Background(), false), "10.0.0.1:6379", "READ", EndpointOK, time.Millisecond)
+	MeasureEndpoint(context.Background(), "10.0.0.2:6379", "INSERT", EndpointCanceled, time.Millisecond)
 	SetEndpointInfo([]EndpointInfo{
 		{Endpoint: "10.0.0.1:6379", NodeID: "a", Role: "master", Shard: "a"},
 		{Endpoint: "10.0.0.1:6379", NodeID: "a", Role: "master", Shard: "a"}, // listed twice: one series
@@ -95,11 +100,11 @@ func TestEndpointSeries(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for series, want := range map[string]float64{
-		`ycsb_endpoint_latency_seconds_count{endpoint="10.0.0.1:6379",op="READ",phase="run"}`:             2,
-		`ycsb_endpoint_latency_seconds_bucket{endpoint="10.0.0.1:6379",op="READ",phase="run",le="0.001"}`: 1,
-		`ycsb_endpoint_latency_seconds_bucket{endpoint="10.0.0.1:6379",op="READ",phase="run",le="60"}`:    1,
-		`ycsb_endpoint_latency_seconds_bucket{endpoint="10.0.0.1:6379",op="READ",phase="run",le="+Inf"}`:  2,
-		`ycsb_endpoint_latency_seconds_sum{endpoint="10.0.0.1:6379",op="READ",phase="run"}`:               70.001,
+		`ycsb_endpoint_latency_seconds_count{endpoint="10.0.0.1:6379",op="READ",phase="run"}`:             3,
+		`ycsb_endpoint_latency_seconds_bucket{endpoint="10.0.0.1:6379",op="READ",phase="run",le="0.001"}`: 2,
+		`ycsb_endpoint_latency_seconds_bucket{endpoint="10.0.0.1:6379",op="READ",phase="run",le="60"}`:    2,
+		`ycsb_endpoint_latency_seconds_bucket{endpoint="10.0.0.1:6379",op="READ",phase="run",le="+Inf"}`:  3,
+		`ycsb_endpoint_latency_seconds_sum{endpoint="10.0.0.1:6379",op="READ",phase="run"}`:               70.002,
 		`ycsb_endpoint_latency_seconds_count{endpoint="10.0.0.1:6379",op="READ_ERROR",phase="run"}`:       1,
 		`ycsb_endpoint_errors_total{endpoint="10.0.0.1:6379",op="READ",phase="run"}`:                      1,
 		`ycsb_endpoint_redirects_total{endpoint="10.0.0.1:6379",op="READ",phase="run"}`:                   0,
@@ -110,12 +115,27 @@ func TestEndpointSeries(t *testing.T) {
 			t.Errorf("%s = %v, want %v", series, got, want)
 		}
 	}
-	if strings.Contains(body, `ycsb_endpoint_errors_total{endpoint="10.0.0.2:6379"`) {
-		t.Error("an error series for an endpoint that only redirected")
+	for series, want := range map[string]float64{
+		// both counters exist from an endpoint's first request of the operation
+		`ycsb_endpoint_errors_total{endpoint="10.0.0.2:6379",op="INSERT",phase="run"}`:                   0,
+		`ycsb_endpoint_latency_seconds_count{endpoint="10.0.0.2:6379",op="INSERT_CANCELED",phase="run"}`: 1,
+	} {
+		if got := metricValue(t, body, series); got != want {
+			t.Errorf("%s = %v, want %v", series, got, want)
+		}
+	}
+
+	// an address that isn't UTF-8 is repaired, not a failed scrape
+	SetEndpointInfo([]EndpointInfo{{Endpoint: "h\xff:6379", NodeID: "a", Role: "master", Shard: "a"}})
+	MeasureEndpoint(context.Background(), "h\xff:6379", "READ", EndpointOK, time.Millisecond)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "ycsb_endpoint_info{endpoint=\"h\uFFFD:6379\"") {
+		t.Errorf("invalid UTF-8: HTTP %d, info repaired %t", rec.Code, strings.Contains(rec.Body.String(), "h\uFFFD:6379"))
 	}
 
 	endpoints.Store(nil)
-	MeasureEndpoint("10.0.0.1:6379", "READ", EndpointOK, time.Millisecond) // a no-op
+	MeasureEndpoint(context.Background(), "10.0.0.1:6379", "READ", EndpointOK, time.Millisecond) // a no-op
 	if EndpointsEnabled() {
 		t.Error("enabled after reset")
 	}

@@ -609,7 +609,7 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		}
 		singleEndpointClient := goredis.NewClient(singleOpts)
 		if rds.endpoints {
-			singleEndpointClient.AddHook(endpointHook{singleOpts.Addr})
+			singleEndpointClient.AddHook(newEndpointHook(singleOpts.Addr))
 		}
 		err = singleEndpointClient.Ping(context.Background()).Err()
 		if err != nil {
@@ -883,7 +883,7 @@ func newClusterNodeClient(opt *goredis.Options) *goredis.Client {
 	}
 	c := goredis.NewClient(opt)
 	if measurement.EndpointsEnabled() {
-		c.AddHook(endpointHook{opt.Addr})
+		c.AddHook(newEndpointHook(opt.Addr))
 	}
 	return c
 }

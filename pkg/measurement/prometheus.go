@@ -226,8 +226,8 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 		c.hdrEnd = desc("ycsb_hdr_window_end_timestamp_seconds", "End of the last completed HDR window, Unix seconds.", "op", "window")
 	}
 	if endpoints.Load() != nil {
-		c.epLatency = desc("ycsb_endpoint_latency_seconds", "Cumulative latency of the requests sent to one server endpoint, in seconds: one network round trip each (a pipeline is one), not an operation. *_ERROR and *_REDIRECT ops are failed and redirected requests.", "endpoint", "op")
-		c.epErrors = desc("ycsb_endpoint_errors_total", "Cumulative failed requests to one server endpoint, redirects excluded.", "endpoint", "op")
+		c.epLatency = desc("ycsb_endpoint_latency_seconds", "Cumulative latency of the requests sent to one server endpoint, in seconds: one round trip each (a pipeline is one; the node client's own retries and the pool wait are inside it), not an operation. *_ERROR, *_REDIRECT and *_CANCELED ops are failed, redirected and client-ended requests.", "endpoint", "op")
+		c.epErrors = desc("ycsb_endpoint_errors_total", "Cumulative failed requests to one server endpoint; redirects and requests the client ended (*_CANCELED) excluded.", "endpoint", "op")
 		c.epRedirects = desc("ycsb_endpoint_redirects_total", "Cumulative requests one server endpoint answered with a redirect (MOVED or ASK).", "endpoint", "op")
 		c.epInfo = desc("ycsb_endpoint_info", "One per endpoint the server reported (CLUSTER NODES): its node ID, role and shard (its master's node ID).", "endpoint", "node_id", "role", "shard")
 	}
@@ -359,26 +359,37 @@ func (c *promCollector) collectEndpoints(ch chan<- prometheus.Metric) {
 	if s == nil || c.epLatency == nil {
 		return
 	}
+	// a series that can't be built is left out rather than failing the scrape
+	emit := func(m prometheus.Metric, err error) {
+		if err == nil {
+			ch <- m
+		}
+	}
 	samples, info := s.snapshot()
 	errs := make(map[endpointKey]uint64)
 	redirects := make(map[endpointKey]uint64)
 	for _, sample := range samples {
-		ch <- prometheus.MustNewConstHistogram(c.epLatency, sample.count, sample.sum, sample.buckets, sample.endpoint, sample.op)
-		if op, ok := strings.CutSuffix(sample.op, EndpointError); ok {
-			errs[endpointKey{sample.endpoint, op}] += sample.count
-		} else if op, ok := strings.CutSuffix(sample.op, EndpointRedirect); ok {
-			redirects[endpointKey{sample.endpoint, op}] += sample.count
-		} else {
-			// a zero, so that the rate of errors exists from the first request
-			errs[endpointKey{sample.endpoint, sample.op}] += 0
-			redirects[endpointKey{sample.endpoint, sample.op}] += 0
+		emit(prometheus.NewConstHistogram(c.epLatency, sample.count, sample.sum, sample.buckets, sample.endpoint, sample.op+sample.outcome))
+		// both counters exist for every operation an endpoint has seen, zero
+		// until the first error or redirect
+		k := endpointKey{endpoint: sample.endpoint, op: sample.op}
+		switch sample.outcome {
+		case EndpointError:
+			errs[k] += sample.count
+			redirects[k] += 0
+		case EndpointRedirect:
+			errs[k] += 0
+			redirects[k] += sample.count
+		default:
+			errs[k] += 0
+			redirects[k] += 0
 		}
 	}
 	for k, n := range errs {
-		ch <- prometheus.MustNewConstMetric(c.epErrors, prometheus.CounterValue, float64(n), k.endpoint, k.op)
+		emit(prometheus.NewConstMetric(c.epErrors, prometheus.CounterValue, float64(n), k.endpoint, k.op))
 	}
 	for k, n := range redirects {
-		ch <- prometheus.MustNewConstMetric(c.epRedirects, prometheus.CounterValue, float64(n), k.endpoint, k.op)
+		emit(prometheus.NewConstMetric(c.epRedirects, prometheus.CounterValue, float64(n), k.endpoint, k.op))
 	}
 	seen := make(map[string]bool, len(info))
 	for _, e := range info {
@@ -386,7 +397,7 @@ func (c *promCollector) collectEndpoints(ch chan<- prometheus.Metric) {
 			continue // a registry refuses a duplicate series
 		}
 		seen[e.Endpoint] = true
-		ch <- prometheus.MustNewConstMetric(c.epInfo, prometheus.GaugeValue, 1, e.Endpoint, e.NodeID, e.Role, e.Shard)
+		emit(prometheus.NewConstMetric(c.epInfo, prometheus.GaugeValue, 1, e.Endpoint, e.NodeID, e.Role, e.Shard))
 	}
 }
 

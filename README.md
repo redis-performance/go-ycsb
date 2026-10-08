@@ -291,25 +291,46 @@ plots the packed HDR p50/p99 gauges when enabled. This branch uses the tagged
 
 Per-endpoint latency is opt-in: add `-p measurement.prometheus_endpoints=true` alongside the exporter listener.
 The `redis` binding then times every request it sends, per server endpoint: in cluster mode each node go-redis
-learned from the cluster's topology (the `ip:port` of `CLUSTER NODES`), in single mode the one address. A request
-is one try on one endpoint: a command that is redirected or retried is several requests, a batch's pipeline is one
-request per master it touched, and the time includes the wait for a pool connection. These are not the operations
-the summary counts and they never enter it, the interval output or `ycsb_latency_seconds`. Connection set-up
-(`HELLO`, `CLIENT SETINFO`, ...) and the client's own topology reads are not counted.
+learned from the cluster's topology (`CLUSTER SLOTS`, the address it dials), in single mode the one address. A
+request is one call on one endpoint's client:
+
+- a redirect (`MOVED`, `ASK`) or a cluster-level retry is a separate request, on the endpoint that answered it;
+- a batch's pipeline is one request per master it touched;
+- the endpoint client's own retries (`redis.max_retries`) are inside one request, backoff included. Cluster mode
+  defaults them to none, so each try is its own request; single mode keeps go-redis's 3;
+- the time includes the wait for a pool connection, and setting up a new connection.
+
+These are not the operations the summary counts, and they never enter it, the interval output or
+`ycsb_latency_seconds`. Connection set-up (`HELLO`, `CLIENT SETINFO`, ...) and the client's own topology reads
+are not counted.
 
 - `ycsb_endpoint_latency_seconds{endpoint,op}`: a histogram on the same 33 fixed bounds as `ycsb_latency_seconds`.
-  `op` is the operation the request belongs to (`READ`, `UPDATE`, `INSERT`, `BATCH_INSERT`, `DELETE`), with
-  `_ERROR` for a failed request and `_REDIRECT` for one answered with `MOVED` or `ASK` (a pipeline with any
-  failed command is `_ERROR`, else with any redirected one `_REDIRECT`). A missing key is an answer, not an error.
-- `ycsb_endpoint_errors_total{endpoint,op}` and `ycsb_endpoint_redirects_total{endpoint,op}`: the failed and the
-  redirected requests' counts, zero from an endpoint's first answered request.
-- `ycsb_endpoint_info{endpoint,node_id,role,shard}`: one per node of the last `CLUSTER NODES` reply, read at start
-  and every 30s (`role` is `master` or `replica`, `shard` the master's node ID). A node announcing a hostname is
-  listed under both `hostname:port` and `ip:port`. Join on `endpoint` to group the latency by shard or role.
+  `op` is the operation the request belongs to (`READ`, `UPDATE`, `INSERT`, `BATCH_INSERT`, `DELETE`), with a
+  suffix for its outcome: `_ERROR` (failed, client timeouts included), `_REDIRECT` (answered `MOVED`/`ASK`) or
+  `_CANCELED` (ended by the client itself at the run's stop: client closed, context canceled). A pipeline with any
+  failed command is `_ERROR`, else with any redirected one `_REDIRECT`. A missing key is an answer, not an
+  error. Select one exact `op` for percentiles and heatmaps: the outcome series would skew them. With
+  `redis.datatype=json`, reads and updates are MULTI/EXEC transactions, whose redirects and per-command errors
+  go-redis reports only after the request: they are counted as answered.
+- `ycsb_endpoint_errors_total{endpoint,op}` and `ycsb_endpoint_redirects_total{endpoint,op}`: the `_ERROR` and
+  `_REDIRECT` requests' counts, by the plain `op`, present (at zero) for every operation an endpoint has seen.
+  `_CANCELED` requests are in neither.
+- `ycsb_endpoint_info{endpoint,node_id,role,shard}`: cluster mode only, one per node of the last
+  `CLUSTER NODES` reply, read at start and every 30s (`role` is `master`, `replica` or `unknown`, `shard` the
+  master's node ID). A node announcing a hostname is listed under both `hostname:port` and `ip:port`; nodes in a
+  handshake or without an address are left out. go-redis dials a loopback address as the seed's host and a
+  port 0 as the seed's port; such endpoints get no info series. Join on the scrape's labels and `endpoint`, e.g.
+  `... * on(instance, endpoint) group_left(role, shard) ycsb_endpoint_info`, keeping the latency series on the
+  left (the hostname double listing would otherwise double count).
 
-Per-endpoint percentiles come from the fixed buckets (`histogram_quantile`), so their resolution is that of the
-bounds. Series grow with endpoints × operations; nothing is recorded during a warm-up. The option does nothing for
-other bindings, and costs nothing when off.
+Percentiles come from the fixed buckets (`histogram_quantile(0.99, sum by (le, endpoint)
+(rate(ycsb_endpoint_latency_seconds_bucket{op="READ"}[30s])))`), so their resolution is that of the bounds
+(100µs, 250µs, 500µs, 750µs, 1ms, ...). Series grow with endpoints × operations × outcomes: 30 masters with
+reads and updates are about 2,000 lines per scrape, 60 endpoints with every operation and outcome about 30,000
+(3.5 MB); raise the scrape interval for large clusters. Nothing is recorded during a warm-up (a batch follows
+the decision the worker made when it started). A scraper that adds its own `endpoint` target label (a Prometheus
+Operator ServiceMonitor) renames this one to `exported_endpoint`. Other bindings record nothing, and the option
+costs nothing when off.
 
 `TOTAL` repeats successful per-operation samples, and `BATCH_*` measures batch calls; keep these separate from
 record-level operations when aggregating distributions.

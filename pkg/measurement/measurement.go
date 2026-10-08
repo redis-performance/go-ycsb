@@ -156,7 +156,7 @@ func InitMeasure(p *properties.Properties) {
 				}
 			}
 			if promConfig.endpoints {
-				endpoints.Store(&endpointStats{hists: make(map[endpointKey]*endpointHist)})
+				endpoints.Store(newEndpointStats())
 			}
 			if err := startPrometheus(promConfig, h, p); err != nil {
 				util.Fatalf("%v", err)

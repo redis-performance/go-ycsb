@@ -14,7 +14,10 @@ package redis
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -162,18 +165,125 @@ func TestEndpointMetricsCluster(t *testing.T) {
 	}
 }
 
-// A single endpoint is timed the same way, under its address.
-func TestEndpointMetricsSingle(t *testing.T) {
+// The binding's own Create times a single endpoint under its address, and
+// Close ends it.
+func TestEndpointMetricsCreateSingle(t *testing.T) {
 	scrape := startEndpointExporter(t)
-	r, _ := newFakeRedis(t, "single", HASH_DATATYPE)
-	r.endpoints = true
-	r.client.(*goredis.Client).AddHook(endpointHook{singleAddr})
-	keys, values := testRecords(2)
-	if err := r.Insert(context.Background(), "usertable", keys[0], values[0]); err != nil {
+	nodes := newFakeNodes(t)
+	conn, err := nodes.dial(context.Background(), "tcp", singleAddr)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := scrape()[epSeries("ycsb_endpoint_latency_seconds_count", singleAddr, "INSERT")]; got != 1 {
-		t.Errorf("single INSERT count = %v, want 1", got)
+	conn.Close()
+	nodes.mu.Lock()
+	addr := nodes.listeners[singleAddr].Addr().String()
+	nodes.mu.Unlock()
+	p := properties.NewProperties()
+	p.Set("threadcount", "2")
+	p.Set(redisMode, "single")
+	p.Set(redisAddr, addr)
+	db, err := redisCreator{}.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, values := testRecords(2)
+	if err := db.Insert(context.Background(), "usertable", keys[0], values[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Delete(context.Background(), "usertable", keys[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got := scrape()
+	for _, op := range []string{"INSERT", "DELETE"} {
+		if n := got[epSeries("ycsb_endpoint_latency_seconds_count", addr, op)]; n != 1 {
+			t.Errorf("single %s count = %v, want 1", op, n)
+		}
+	}
+}
+
+// A record a master fails makes that master's pipeline an error; a redirect
+// alone, a redirect. ASK is a redirect like MOVED. Update is labelled UPDATE.
+func TestEndpointMetricsOutcomes(t *testing.T) {
+	scrape := startEndpointExporter(t)
+	ctx := context.Background()
+	r, nodes := newFakeRedis(t, "cluster", HASH_DATATYPE, redisMaxRedirects, "3")
+	r.endpoints = true
+	keys, values := testRecords(60)
+	failed := "usertable/" + keys[3]
+	nodes.fail = func(addr string, args []string) string {
+		if args[1] == failed {
+			return "ERR refused"
+		}
+		return ""
+	}
+	if err := r.BatchInsert(ctx, "usertable", keys, values); err == nil {
+		t.Fatal("the batch with a refused record succeeded")
+	}
+	nodes.fail = nil
+	got := scrape()
+	for _, s := range clusterSlots {
+		addr, want := s.Nodes[0].Addr, "BATCH_INSERT"
+		if addr == slotOwner(failed) {
+			want = "BATCH_INSERT_ERROR"
+		}
+		if n := got[epSeries("ycsb_endpoint_latency_seconds_count", addr, want)]; n != 1 {
+			t.Errorf("%s %s = %v, want 1", addr, want, n)
+		}
+	}
+
+	asked := "usertable/" + keys[9]
+	owner := slotOwner(asked)
+	other := clusterSlots[0].Nodes[0].Addr
+	if other == owner {
+		other = clusterSlots[1].Nodes[0].Addr
+	}
+	once := true
+	nodes.moved = func(addr string, args []string) string {
+		if args[1] == asked && addr == owner && once {
+			once = false
+			return "ask:" + other
+		}
+		return ""
+	}
+	if err := r.Insert(ctx, "usertable", keys[9], values[9]); err != nil {
+		t.Fatal(err)
+	}
+	nodes.moved = nil
+	if err := r.Update(ctx, "usertable", keys[9], values[9]); err != nil {
+		t.Fatal(err)
+	}
+	got = scrape()
+	for series, want := range map[string]float64{
+		epSeries("ycsb_endpoint_latency_seconds_count", owner, "INSERT_REDIRECT"): 1,
+		epSeries("ycsb_endpoint_latency_seconds_count", other, "INSERT"):          1,
+		epSeries("ycsb_endpoint_latency_seconds_count", owner, "UPDATE"):          1,
+	} {
+		if got[series] != want {
+			t.Errorf("%s = %v, want %v", series, got[series], want)
+		}
+	}
+}
+
+func TestEndpointOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		errs []error
+		want string
+	}{
+		{"ok", []error{nil}, measurement.EndpointOK},
+		{"missing key", []error{goredis.Nil}, measurement.EndpointOK},
+		{"failed", []error{errors.New("ERR refused")}, measurement.EndpointError},
+		{"client closed", []error{goredis.ErrClosed}, measurement.EndpointCanceled},
+		{"closed conn", []error{fmt.Errorf("read: %w", net.ErrClosed)}, measurement.EndpointCanceled},
+		{"canceled", []error{context.Canceled}, measurement.EndpointCanceled},
+		{"timeout", []error{context.DeadlineExceeded}, measurement.EndpointError},
+	} {
+		if got := endpointOutcome(tc.errs...); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -192,6 +302,12 @@ func TestParseClusterNodes(t *testing.T) {
 		"67ed2db8d677e59ec4a4cefb06858cf2a1a89fa1 127.0.0.1:30002@31002 master - 0 1426238316232 2 connected 5461-10922",
 		"e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca 127.0.0.1:30001@31001 myself,master - 0 0 1 connected 0-5460",
 		"6ec23923021cf3ffec47632106199cb7f496ce01 :0@0 master,fail,noaddr - 1426238316232 1426238315228 5 disconnected",
+		// IPv6, printed bare; an auxiliary field after the hostname
+		"aaaa 2001:db8::5:7001@17001,node-6.example,shard-id=xyz master - 0 0 6 connected 10923-16383",
+		// a ghost a restarted node left at the same address, before the live node
+		"bbbb 10.0.0.9:7003@17003 master,fail - 0 0 7 disconnected",
+		"cccc 10.0.0.9:7003@17003 master - 0 0 8 connected 16000-16100",
+		"dddd 10.0.0.10:7004@17004 handshake - 0 0 0 connected",
 		"",
 	}, "\n")
 	got := parseClusterNodes(reply)
@@ -200,6 +316,9 @@ func TestParseClusterNodes(t *testing.T) {
 		{Endpoint: "node-4.example:30004", NodeID: "07c37dfeb235213a872192d90877d0cd55635b91", Role: "replica", Shard: "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca"},
 		{Endpoint: "127.0.0.1:30002", NodeID: "67ed2db8d677e59ec4a4cefb06858cf2a1a89fa1", Role: "master", Shard: "67ed2db8d677e59ec4a4cefb06858cf2a1a89fa1"},
 		{Endpoint: "127.0.0.1:30001", NodeID: "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca", Role: "master", Shard: "e7d1eecce10fd6bb5eb35b9f99a514335d9ba9ca"},
+		{Endpoint: "[2001:db8::5]:7001", NodeID: "aaaa", Role: "master", Shard: "aaaa"},
+		{Endpoint: "node-6.example:7001", NodeID: "aaaa", Role: "master", Shard: "aaaa"},
+		{Endpoint: "10.0.0.9:7003", NodeID: "cccc", Role: "master", Shard: "cccc"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseClusterNodes:\n got %+v\nwant %+v", got, want)

@@ -15,6 +15,7 @@ package measurement
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,10 +23,10 @@ import (
 
 // Per-endpoint latency (measurement.prometheus_endpoints): a DB binding times
 // each request it sends to one server endpoint (a node of CLUSTER NODES, say)
-// and records it here with MeasureEndpoint. These are network round trips to
-// one endpoint, not the operations the summary counts: an operation that
-// redirects or retries is several of them, and client queueing is not in
-// them. They are exported on their own series (ycsb_endpoint_*) and never
+// and records it here with MeasureEndpoint. These are requests to one
+// endpoint, not the operations the summary counts: an operation that is
+// redirected is several of them, and the client's queueing for a thread is
+// not in them (see the binding for what one request covers). They are exported on their own series (ycsb_endpoint_*) and never
 // enter the summary, the interval output or ycsb_latency_seconds.
 
 // EndpointInfo describes one endpoint as the server reports it.
@@ -36,14 +37,13 @@ type EndpointInfo struct {
 	Shard    string // the node ID of the master the endpoint belongs to
 }
 
-// endpointKey is one endpoint's series for one operation; op carries the
-// outcome suffix (READ, READ_ERROR, READ_REDIRECT).
+// endpointKey is one endpoint's series for one operation and outcome
+// (EndpointOK, EndpointError, ...): kept apart, so recording a failure
+// builds no string.
 type endpointKey struct {
-	endpoint string
-	op       string
+	endpoint, op, outcome string
 }
 
-// endpointHist is lock-free: every request thread records into it at once.
 // The last bucket is +Inf.
 type endpointHist struct {
 	buckets []atomic.Uint64
@@ -62,10 +62,20 @@ func (h *endpointHist) record(lan time.Duration) {
 	h.sumNs.Add(int64(lan))
 }
 
+// endpointStats: the series are a copy-on-write map, read with one atomic
+// load per request (a read lock's shared counter would be written by every
+// request thread); a new series copies it under mu, rarely after the first
+// seconds of a run.
 type endpointStats struct {
-	mu    sync.RWMutex
-	hists map[endpointKey]*endpointHist
+	hists atomic.Pointer[map[endpointKey]*endpointHist]
+	mu    sync.Mutex // guards writes of hists, and info
 	info  []EndpointInfo
+}
+
+func newEndpointStats() *endpointStats {
+	s := &endpointStats{}
+	s.hists.Store(&map[endpointKey]*endpointHist{})
+	return s
 }
 
 // endpoints is nil unless measurement.prometheus_endpoints is on; set by
@@ -97,25 +107,52 @@ const (
 	EndpointOK       = ""
 	EndpointError    = "_ERROR"
 	EndpointRedirect = "_REDIRECT"
+	// EndpointCanceled is a request the client itself ended: the run's stop
+	// closed the client or canceled the request. No endpoint failed it.
+	EndpointCanceled = "_CANCELED"
 )
 
+type measuredKey struct{}
+
+// WithMeasured marks ctx with whether the operations run on it are measured:
+// the worker decides it once when a batch starts, so that a warm-up ending
+// while the batch runs can't leave some of its records (or requests)
+// measured and the rest not.
+func WithMeasured(ctx context.Context, measured bool) context.Context {
+	return context.WithValue(ctx, measuredKey{}, measured)
+}
+
+// Measured says whether the operations on ctx are measured: as WithMeasured
+// marked it, else whether the warm-up is over.
+func Measured(ctx context.Context) bool {
+	if measured, ok := ctx.Value(measuredKey{}).(bool); ok {
+		return measured
+	}
+	return IsWarmUpFinished()
+}
+
 // MeasureEndpoint records one request of op to endpoint that took lan, with
-// its outcome (EndpointOK, EndpointError or EndpointRedirect). Like the
-// operations, nothing is recorded during a warm-up.
-func MeasureEndpoint(endpoint, op, outcome string, lan time.Duration) {
+// its outcome (EndpointOK, EndpointError, EndpointRedirect or
+// EndpointCanceled). Like the operations, nothing is recorded during a
+// warm-up (Measured(ctx)).
+func MeasureEndpoint(ctx context.Context, endpoint, op, outcome string, lan time.Duration) {
 	s := endpoints.Load()
-	if s == nil || !IsWarmUpFinished() {
+	if s == nil || !Measured(ctx) {
 		return
 	}
-	k := endpointKey{endpoint, op + outcome}
-	s.mu.RLock()
-	h, ok := s.hists[k]
-	s.mu.RUnlock()
+	k := endpointKey{endpoint, op, outcome}
+	h, ok := (*s.hists.Load())[k]
 	if !ok {
 		s.mu.Lock()
-		if h, ok = s.hists[k]; !ok {
+		old := *s.hists.Load()
+		if h, ok = old[k]; !ok {
+			m := make(map[endpointKey]*endpointHist, len(old)+1)
+			for k, v := range old {
+				m[k] = v
+			}
 			h = newEndpointHist()
-			s.hists[k] = h
+			m[k] = h
+			s.hists.Store(&m)
 		}
 		s.mu.Unlock()
 	}
@@ -123,13 +160,17 @@ func MeasureEndpoint(endpoint, op, outcome string, lan time.Duration) {
 }
 
 // SetEndpointInfo replaces what is known of the endpoints (the last CLUSTER
-// NODES reply, say).
+// NODES reply, say). Values that aren't UTF-8 are repaired: the server
+// supplies them, and an invalid label value would fail every scrape.
 func SetEndpointInfo(info []EndpointInfo) {
 	s := endpoints.Load()
 	if s == nil {
 		return
 	}
 	info = append([]EndpointInfo(nil), info...)
+	for i, e := range info {
+		info[i] = EndpointInfo{validUTF8(e.Endpoint), validUTF8(e.NodeID), validUTF8(e.Role), validUTF8(e.Shard)}
+	}
 	s.mu.Lock()
 	s.info = info
 	s.mu.Unlock()
@@ -137,17 +178,22 @@ func SetEndpointInfo(info []EndpointInfo) {
 
 // endpointSample is one series' cumulative histogram at a scrape.
 type endpointSample struct {
-	endpoint, op string
-	count        uint64
-	sum          float64
-	buckets      map[float64]uint64
+	endpoint, op, outcome string
+	count                 uint64
+	sum                   float64
+	buckets               map[float64]uint64
 }
 
+// EndpointLabel is endpoint as a valid label value, for a binding to label
+// its requests with: an address the server announced need not be UTF-8.
+func EndpointLabel(endpoint string) string { return validUTF8(endpoint) }
+
+func validUTF8(v string) string { return strings.ToValidUTF8(v, "\uFFFD") }
+
 func (s *endpointStats) snapshot() ([]endpointSample, []EndpointInfo) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	samples := make([]endpointSample, 0, len(s.hists))
-	for k, h := range s.hists {
+	hists := *s.hists.Load()
+	samples := make([]endpointSample, 0, len(hists))
+	for k, h := range hists {
 		// the count is the buckets' total, read once, so that it is never
 		// below the last finite bucket's cumulative count
 		buckets := make(map[float64]uint64, len(promLatencyBucketsUs))
@@ -157,8 +203,11 @@ func (s *endpointStats) snapshot() ([]endpointSample, []EndpointInfo) {
 			buckets[float64(upperUs)/1e6] = cumulative
 		}
 		cumulative += h.buckets[len(promLatencyBucketsUs)].Load()
-		samples = append(samples, endpointSample{k.endpoint, k.op, cumulative,
+		samples = append(samples, endpointSample{k.endpoint, k.op, k.outcome, cumulative,
 			float64(h.sumNs.Load()) / 1e9, buckets})
 	}
-	return samples, s.info
+	s.mu.Lock()
+	info := s.info
+	s.mu.Unlock()
+	return samples, info
 }
