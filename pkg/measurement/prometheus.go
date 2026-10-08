@@ -175,6 +175,7 @@ type promCollector struct {
 	epRedirects  *prometheus.Desc
 	epInfo       *prometheus.Desc
 	epOverflow   *prometheus.Desc
+	epInfoAt     *prometheus.Desc
 	infoVals     []string
 	targetValue  float64
 	plannedValue float64
@@ -231,6 +232,7 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 		c.epErrors = desc("ycsb_endpoint_errors_total", "Cumulative failed requests to one server endpoint; redirects and requests the client ended (*_CANCELED) excluded.", "endpoint", "op")
 		c.epRedirects = desc("ycsb_endpoint_redirects_total", "Cumulative requests one server endpoint answered with a redirect (MOVED or ASK).", "endpoint", "op")
 		c.epOverflow = desc("ycsb_endpoint_overflow_total", "Endpoints past the first 1024, whose requests are recorded under endpoint=\"other\".")
+		c.epInfoAt = desc("ycsb_endpoint_info_refreshed_timestamp_seconds", "When ycsb_endpoint_info was last read (CLUSTER NODES), Unix seconds; a failed read keeps the previous one.")
 		c.epInfo = desc("ycsb_endpoint_info", "One per endpoint the server reported (CLUSTER NODES): its node ID, role and shard (its master's node ID).", "endpoint", "node_id", "role", "shard")
 	}
 	return c
@@ -239,7 +241,7 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 func (c *promCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{c.info, c.running, c.target, c.planned, c.queueDepth, c.queueCap, c.ops, c.errors, c.latencyHist, c.latency,
 		c.avg, c.max, c.count, c.window, c.end, c.hdrCount, c.hdrDropped, c.hdrLatency, c.hdrCoverage, c.hdrValid, c.hdrEnd,
-		c.epLatency, c.epErrors, c.epRedirects, c.epInfo, c.epOverflow} {
+		c.epLatency, c.epErrors, c.epRedirects, c.epInfo, c.epOverflow, c.epInfoAt} {
 		if d != nil {
 			ch <- d
 		}
@@ -367,7 +369,10 @@ func (c *promCollector) collectEndpoints(ch chan<- prometheus.Metric) {
 			ch <- m
 		}
 	}
-	samples, info, overflow := s.snapshot()
+	samples, info, infoAt, overflow := s.snapshot()
+	if !infoAt.IsZero() {
+		emit(prometheus.NewConstMetric(c.epInfoAt, prometheus.GaugeValue, float64(infoAt.UnixNano())/1e9))
+	}
 	emit(prometheus.NewConstMetric(c.epOverflow, prometheus.CounterValue, float64(overflow)))
 	errs := make(map[endpointKey]uint64)
 	redirects := make(map[endpointKey]uint64)

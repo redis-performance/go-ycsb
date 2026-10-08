@@ -317,8 +317,11 @@ are not counted.
   `_REDIRECT` requests' counts, by the plain `op`, present (at zero) for every operation an endpoint has seen.
   `_CANCELED` requests are in neither.
 - `ycsb_endpoint_info{endpoint,node_id,role,shard}`: cluster mode only, one per node of the last
-  `CLUSTER NODES` reply, read at start and every 30s (`role` is `master`, `replica` or `unknown`, `shard` the
-  master's node ID). A node announcing a hostname is listed under both `hostname:port` and `ip:port`; nodes in a
+  `CLUSTER NODES` reply, read at start, 5s later (a new cluster's gossip can lag), every 30s and after a
+  redirect (at most every 2s; `ycsb_endpoint_info_refreshed_timestamp_seconds` is the last read). Between a
+  failover and the next read the roles are the old ones. `MOVED` and `ASK` are both `_REDIRECT`.
+  `role` is `master`, `replica` or `unknown`, `shard` the
+  master's node ID. A node announcing a hostname is listed under both `hostname:port` and `ip:port`; nodes in a
   handshake or without an address are left out, and when two lines share an address (a restarted node's
   failed ghost) the one not flagged `fail` wins. An IPv6 endpoint is `[addr]:port`, as go-redis dials it. go-redis dials a loopback address as the seed's host and a
   port 0 as the seed's port; such endpoints get no info series. Join on the scrape's labels and `endpoint`, e.g.

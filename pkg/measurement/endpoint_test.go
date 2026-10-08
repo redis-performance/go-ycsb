@@ -116,6 +116,9 @@ func TestEndpointSeries(t *testing.T) {
 			t.Errorf("%s = %v, want %v", series, got, want)
 		}
 	}
+	if got := metricValue(t, body, `ycsb_endpoint_info_refreshed_timestamp_seconds{phase="run"}`); got < float64(time.Now().Add(-time.Minute).Unix()) {
+		t.Errorf("info refreshed at %v, want just now", got)
+	}
 	for series, want := range map[string]float64{
 		// both counters exist from an endpoint's first request of the operation
 		`ycsb_endpoint_errors_total{endpoint="10.0.0.2:6379",op="INSERT",phase="run"}`:                   0,
@@ -154,7 +157,7 @@ func TestEndpointCap(t *testing.T) {
 		MeasureEndpoint(ctx, ep, "READ", EndpointOK, time.Millisecond)
 		MeasureEndpoint(ctx, ep, "READ", EndpointOK, time.Millisecond) // a known one again
 	}
-	samples, _, overflow := s.snapshot()
+	samples, _, _, overflow := s.snapshot()
 	if len(samples) != maxEndpoints+1 || overflow != 5 {
 		t.Fatalf("%d series, overflow %d; want %d series and 5", len(samples), overflow, maxEndpoints+1)
 	}

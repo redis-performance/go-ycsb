@@ -56,7 +56,11 @@ func (h endpointHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook 
 		}
 		start := time.Now()
 		err := next(ctx, cmd)
-		measurement.MeasureEndpoint(ctx, h.endpoint, op, endpointOutcome(err), time.Since(start))
+		outcome := endpointOutcome(err)
+		measurement.MeasureEndpoint(ctx, h.endpoint, op, outcome, time.Since(start))
+		if outcome == measurement.EndpointRedirect {
+			askEndpointInfo()
+		}
 		return err
 	}
 }
@@ -77,6 +81,9 @@ func (h endpointHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) gore
 			}
 		}
 		measurement.MeasureEndpoint(ctx, h.endpoint, op, outcome, lan)
+		if outcome == measurement.EndpointRedirect {
+			askEndpointInfo()
+		}
 		return err
 	}
 }
@@ -184,13 +191,36 @@ func labelEndpointOp(ctx context.Context, op *measurement.EndpointOp) context.Co
 // (CLUSTER NODES), so that a failover's new roles show within it.
 const endpointInfoRefresh = 30 * time.Second
 
-// refreshEndpointInfo publishes the cluster's CLUSTER NODES reply now and
-// then every endpointInfoRefresh until stop is closed. A failed read keeps
-// the last reply; only the first failure is logged (a proxy that refuses
-// CLUSTER NODES would otherwise log every 30 s).
+// endpointInfoSettle is when the identities are read a second time: right
+// after a cluster is created a node's CLUSTER NODES can still lag the
+// gossip (replicas listed as masters).
+const endpointInfoSettle = 5 * time.Second
+
+// endpointInfoMinGap spaces the reads a redirect asks for.
+const endpointInfoMinGap = 2 * time.Second
+
+// endpointInfoNow asks the refresh for a read now: a redirect means the slot
+// map, and maybe the roles, changed (a failover). It never blocks.
+var endpointInfoNow = make(chan struct{}, 1)
+
+func askEndpointInfo() {
+	select {
+	case endpointInfoNow <- struct{}{}:
+	default:
+	}
+}
+
+// refreshEndpointInfo publishes the cluster's CLUSTER NODES reply now, again
+// after endpointInfoSettle, then every endpointInfoRefresh and after a
+// redirect (at most every endpointInfoMinGap), until stop is closed. A failed
+// read keeps the last reply (ycsb_endpoint_info_refreshed_timestamp_seconds
+// tells its age); only the first failure is logged (a proxy that refuses
+// CLUSTER NODES would otherwise log every time).
 func refreshEndpointInfo(c *goredis.ClusterClient, stop <-chan struct{}) {
 	logged := false
+	var last time.Time
 	read := func() {
+		last = time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		reply, err := c.ClusterNodes(ctx).Result()
@@ -205,14 +235,22 @@ func refreshEndpointInfo(c *goredis.ClusterClient, stop <-chan struct{}) {
 	}
 	read()
 	go func() {
+		settle := time.NewTimer(endpointInfoSettle)
+		defer settle.Stop()
 		t := time.NewTicker(endpointInfoRefresh)
 		defer t.Stop()
 		for {
 			select {
 			case <-stop:
 				return
+			case <-settle.C:
+				read()
 			case <-t.C:
 				read()
+			case <-endpointInfoNow:
+				if time.Since(last) >= endpointInfoMinGap {
+					read()
+				}
 			}
 		}
 	}()

@@ -84,6 +84,7 @@ type endpointStats struct {
 	overflow atomic.Int64
 	seen     map[string]bool // the endpoints past maxEndpoints, counted once
 	info     []EndpointInfo
+	infoAt   time.Time // when info was last replaced
 }
 
 // endpointSeries are one endpoint's series, by operation and outcome.
@@ -255,7 +256,7 @@ func SetEndpointInfo(info []EndpointInfo) {
 		info[i] = EndpointInfo{validUTF8(e.Endpoint), validUTF8(e.NodeID), validUTF8(e.Role), validUTF8(e.Shard)}
 	}
 	s.mu.Lock()
-	s.info = info
+	s.info, s.infoAt = info, time.Now()
 	s.mu.Unlock()
 }
 
@@ -273,7 +274,7 @@ func EndpointLabel(endpoint string) string { return validUTF8(endpoint) }
 
 func validUTF8(v string) string { return strings.ToValidUTF8(v, "\uFFFD") }
 
-func (s *endpointStats) snapshot() ([]endpointSample, []EndpointInfo, int64) {
+func (s *endpointStats) snapshot() ([]endpointSample, []EndpointInfo, time.Time, int64) {
 	var samples []endpointSample
 	for endpoint, e := range *s.eps.Load() {
 		for k, h := range *e.hists.Load() {
@@ -291,7 +292,7 @@ func (s *endpointStats) snapshot() ([]endpointSample, []EndpointInfo, int64) {
 		}
 	}
 	s.mu.Lock()
-	info := s.info
+	info, infoAt := s.info, s.infoAt
 	s.mu.Unlock()
-	return samples, info, s.overflow.Load()
+	return samples, info, infoAt, s.overflow.Load()
 }
