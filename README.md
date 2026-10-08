@@ -191,6 +191,7 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
 |measurement.prometheus_linger|1s|How long to serve final counts after the command finishes, as a non-negative Go duration|
 |measurement.prometheus_hdr_windows|false|With the Prometheus exporter and `measurement.interval=1s`, retain 60 packed HDR interval slices and publish rolling 30s/60s quantiles and distributions|
 |measurement.hdr_minute_output_file|""|With packed HDR windows enabled, write one full HDR distribution per operation after every 60 reporter slices as JSONL|
+|measurement.prometheus_endpoints|false|With the Prometheus exporter: time every request per server endpoint (`redis`: each node of `CLUSTER NODES`, or the single address) and export `ycsb_endpoint_*`|
 
 ### Prometheus exporter
 
@@ -287,6 +288,28 @@ minute-resolution heatmap from the 33 fixed Prometheus latency bounds, plus a li
 `increase` estimates counts, and Grafana can use a coarser step for long ranges. It also
 plots the packed HDR p50/p99 gauges when enabled. This branch uses the tagged
 `hdrhistogram-go` v1.4.0 release for the packed APIs.
+
+Per-endpoint latency is opt-in: add `-p measurement.prometheus_endpoints=true` alongside the exporter listener.
+The `redis` binding then times every request it sends, per server endpoint: in cluster mode each node go-redis
+learned from the cluster's topology (the `ip:port` of `CLUSTER NODES`), in single mode the one address. A request
+is one try on one endpoint: a command that is redirected or retried is several requests, a batch's pipeline is one
+request per master it touched, and the time includes the wait for a pool connection. These are not the operations
+the summary counts and they never enter it, the interval output or `ycsb_latency_seconds`. Connection set-up
+(`HELLO`, `CLIENT SETINFO`, ...) and the client's own topology reads are not counted.
+
+- `ycsb_endpoint_latency_seconds{endpoint,op}`: a histogram on the same 33 fixed bounds as `ycsb_latency_seconds`.
+  `op` is the operation the request belongs to (`READ`, `UPDATE`, `INSERT`, `BATCH_INSERT`, `DELETE`), with
+  `_ERROR` for a failed request and `_REDIRECT` for one answered with `MOVED` or `ASK` (a pipeline with any
+  failed command is `_ERROR`, else with any redirected one `_REDIRECT`). A missing key is an answer, not an error.
+- `ycsb_endpoint_errors_total{endpoint,op}` and `ycsb_endpoint_redirects_total{endpoint,op}`: the failed and the
+  redirected requests' counts, zero from an endpoint's first answered request.
+- `ycsb_endpoint_info{endpoint,node_id,role,shard}`: one per node of the last `CLUSTER NODES` reply, read at start
+  and every 30s (`role` is `master` or `replica`, `shard` the master's node ID). A node announcing a hostname is
+  listed under both `hostname:port` and `ip:port`. Join on `endpoint` to group the latency by shard or role.
+
+Per-endpoint percentiles come from the fixed buckets (`histogram_quantile`), so their resolution is that of the
+bounds. Series grow with endpoints × operations; nothing is recorded during a warm-up. The option does nothing for
+other bindings, and costs nothing when off.
 
 `TOTAL` repeats successful per-operation samples, and `BATCH_*` measures batch calls; keep these separate from
 record-level operations when aggregating distributions.
