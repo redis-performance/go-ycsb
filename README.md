@@ -285,8 +285,8 @@ To view *historical* minute columns in Grafana from full
 HDR buckets, load this JSONL into a data source that supports heatmaps. The included Grafana dashboard has a
 minute-resolution heatmap from the 33 fixed Prometheus latency bounds, plus a live rolling heatmap. Prometheus
 `increase` estimates counts, and Grafana can use a coarser step for long ranges. It also
-plots the packed HDR p50/p99 gauges when enabled. This branch pins the upstream `master` commit with the packed
-APIs until a release is tagged.
+plots the packed HDR p50/p99 gauges when enabled. This branch uses the tagged
+`hdrhistogram-go` v1.4.0 release for the packed APIs.
 
 `TOTAL` repeats successful per-operation samples, and `BATCH_*` measures batch calls; keep these separate from
 record-level operations when aggregating distributions.
