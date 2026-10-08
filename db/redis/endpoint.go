@@ -72,10 +72,7 @@ func (h endpointHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) gore
 		lan := time.Since(start)
 		outcome := endpointOutcome(err)
 		for _, cmd := range cmds {
-			if o := endpointOutcome(cmd.Err()); o == measurement.EndpointError {
-				outcome = o
-				break
-			} else if o == measurement.EndpointRedirect {
+			if o := endpointOutcome(cmd.Err()); outcomeRank(o) > outcomeRank(outcome) {
 				outcome = o
 			}
 		}
@@ -100,25 +97,41 @@ func allConnSetup(cmds []goredis.Cmder) bool {
 	return len(cmds) > 0
 }
 
-// endpointOutcome classifies a request by its errors: a redirect (MOVED, ASK)
-// is the endpoint answering that another one owns the slot, not a failure,
-// and a nil reply (a missing key) is an answer.
+// endpointOutcome classifies a request by its errors (a pipeline's: its own
+// and its commands'), the worst of them winning: a failure, then an end the
+// client caused (the run's stop), then a redirect (MOVED, ASK: the endpoint
+// answering that another one owns the slot, not a failure), else answered.
+// A nil reply (a missing key) is an answer.
 func endpointOutcome(errs ...error) string {
 	outcome := measurement.EndpointOK
 	for _, err := range errs {
+		o := measurement.EndpointOK
 		switch {
 		case err == nil || errors.Is(err, goredis.Nil):
 		case isRedirect(err):
-			if outcome == measurement.EndpointOK {
-				outcome = measurement.EndpointRedirect
-			}
+			o = measurement.EndpointRedirect
 		case clientEnded(err):
-			outcome = measurement.EndpointCanceled
+			o = measurement.EndpointCanceled
 		default:
 			return measurement.EndpointError
 		}
+		if outcomeRank(o) > outcomeRank(outcome) {
+			outcome = o
+		}
 	}
 	return outcome
+}
+
+func outcomeRank(o string) int {
+	switch o {
+	case measurement.EndpointRedirect:
+		return 1
+	case measurement.EndpointCanceled:
+		return 2
+	case measurement.EndpointError:
+		return 3
+	}
+	return 0
 }
 
 // clientEnded says whether the client, not the endpoint, ended a request:

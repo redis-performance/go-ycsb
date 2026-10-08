@@ -280,6 +280,11 @@ func TestEndpointOutcome(t *testing.T) {
 		{"closed conn", []error{fmt.Errorf("read: %w", net.ErrClosed)}, measurement.EndpointCanceled},
 		{"canceled", []error{context.Canceled}, measurement.EndpointCanceled},
 		{"timeout", []error{context.DeadlineExceeded}, measurement.EndpointError},
+		// a pipeline: the worst of its errors, in any order
+		{"redirect then canceled", []error{nil, movedErr(t), context.Canceled}, measurement.EndpointCanceled},
+		{"canceled then redirect", []error{context.Canceled, movedErr(t)}, measurement.EndpointCanceled},
+		{"redirect then failed", []error{movedErr(t), errors.New("ERR refused")}, measurement.EndpointError},
+		{"redirect alone", []error{nil, movedErr(t)}, measurement.EndpointRedirect},
 	} {
 		if got := endpointOutcome(tc.errs...); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
@@ -377,4 +382,17 @@ func TestEndpointMetricsBatchRedirect(t *testing.T) {
 	if n := got[epSeries("ycsb_endpoint_latency_seconds_count", other, "BATCH_INSERT")]; n != 2 {
 		t.Errorf("the redirect's target answered %v pipelines, want 2 (its own and the redirected record)", n)
 	}
+}
+
+// movedErr is a MOVED reply as go-redis returns it, from a fake node.
+func movedErr(t *testing.T) error {
+	t.Helper()
+	r, nodes := newFakeRedis(t, "single", HASH_DATATYPE, redisMaxRetries, "-1")
+	nodes.moved = func(string, []string) string { return "fake-node-2:7002" }
+	keys, values := testRecords(1)
+	err := r.Insert(context.Background(), "usertable", keys[0], values[0])
+	if !isRedirect(err) {
+		t.Fatalf("fake MOVED: %v is not a redirect", err)
+	}
+	return err
 }
