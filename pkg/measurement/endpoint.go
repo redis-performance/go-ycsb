@@ -22,18 +22,19 @@ import (
 )
 
 // Per-endpoint latency (measurement.prometheus_endpoints): a DB binding times
-// each request it sends to one server endpoint (a node of CLUSTER NODES, say)
-// and records it here with MeasureEndpoint. These are requests to one
-// endpoint, not the operations the summary counts: an operation that is
+// each request it sends to one server endpoint (a cluster node the client
+// dials, say) and records it here with MeasureEndpoint. These are requests to
+// one endpoint, not the operations the summary counts: an operation that is
 // redirected is several of them, and the client's queueing for a thread is
-// not in them (see the binding for what one request covers). They are exported on their own series (ycsb_endpoint_*) and never
-// enter the summary, the interval output or ycsb_latency_seconds.
+// not in them (see the binding for what one request covers). They are
+// exported on their own series (ycsb_endpoint_*) and never enter the summary,
+// the interval output or ycsb_latency_seconds.
 
 // EndpointInfo describes one endpoint as the server reports it.
 type EndpointInfo struct {
 	Endpoint string // host:port, as the client dials it
 	NodeID   string
-	Role     string // "master" or "replica"
+	Role     string // "master", "replica" or "unknown"
 	Shard    string // the node ID of the master the endpoint belongs to
 }
 

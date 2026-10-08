@@ -226,7 +226,7 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 		c.hdrEnd = desc("ycsb_hdr_window_end_timestamp_seconds", "End of the last completed HDR window, Unix seconds.", "op", "window")
 	}
 	if endpoints.Load() != nil {
-		c.epLatency = desc("ycsb_endpoint_latency_seconds", "Cumulative latency of the requests sent to one server endpoint, in seconds: one round trip each (a pipeline is one; the node client's own retries and the pool wait are inside it), not an operation. *_ERROR, *_REDIRECT and *_CANCELED ops are failed, redirected and client-ended requests.", "endpoint", "op")
+		c.epLatency = desc("ycsb_endpoint_latency_seconds", "Cumulative latency of the requests sent to one server endpoint, in seconds: one request each (a pipeline is one; the node client's own retries, the pool wait and a new connection's set-up are inside it), not an operation. *_ERROR, *_REDIRECT and *_CANCELED ops are failed, redirected and client-ended requests.", "endpoint", "op")
 		c.epErrors = desc("ycsb_endpoint_errors_total", "Cumulative failed requests to one server endpoint; redirects and requests the client ended (*_CANCELED) excluded.", "endpoint", "op")
 		c.epRedirects = desc("ycsb_endpoint_redirects_total", "Cumulative requests one server endpoint answered with a redirect (MOVED or ASK).", "endpoint", "op")
 		c.epInfo = desc("ycsb_endpoint_info", "One per endpoint the server reported (CLUSTER NODES): its node ID, role and shard (its master's node ID).", "endpoint", "node_id", "role", "shard")
