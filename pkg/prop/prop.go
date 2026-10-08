@@ -172,7 +172,10 @@ const (
 	MeasurementPrometheusLabels     = "measurement.prometheus_labels"
 	MeasurementPrometheusLinger     = "measurement.prometheus_linger"
 	MeasurementPrometheusHDRWindows = "measurement.prometheus_hdr_windows"
-	MeasurementHDRMinuteOutputFile  = "measurement.hdr_minute_output_file"
+	// MeasurementPrometheusEndpoints exports each request's latency per server
+	// endpoint (ycsb_endpoint_*), for bindings that time them (redis).
+	MeasurementPrometheusEndpoints = "measurement.prometheus_endpoints"
+	MeasurementHDRMinuteOutputFile = "measurement.hdr_minute_output_file"
 
 	MeasurementType          = "measurementtype"
 	MeasurementTypeDefault   = "histogram"

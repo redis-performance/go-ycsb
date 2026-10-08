@@ -191,6 +191,7 @@ These are core-workload properties (see [Running-a-Workload](https://github.com/
 |measurement.prometheus_linger|1s|How long to serve final counts after the command finishes, as a non-negative Go duration|
 |measurement.prometheus_hdr_windows|false|With the Prometheus exporter and `measurement.interval=1s`, retain 60 packed HDR interval slices and publish rolling 30s/60s quantiles and distributions|
 |measurement.hdr_minute_output_file|""|With packed HDR windows enabled, write one full HDR distribution per operation after every 60 reporter slices as JSONL|
+|measurement.prometheus_endpoints|false|With the Prometheus exporter: time every request per server endpoint (`redis`: each cluster node go-redis dials, learned from `CLUSTER SLOTS`, or the single address) and export `ycsb_endpoint_*`|
 
 ### Prometheus exporter
 
@@ -287,6 +288,57 @@ minute-resolution heatmap from the 33 fixed Prometheus latency bounds, plus a li
 `increase` estimates counts, and Grafana can use a coarser step for long ranges. It also
 plots the packed HDR p50/p99 gauges when enabled. This branch uses the tagged
 `hdrhistogram-go` v1.4.0 release for the packed APIs.
+
+Per-endpoint latency is opt-in: add `-p measurement.prometheus_endpoints=true` alongside the exporter listener.
+The `redis` binding then times every request it sends, per server endpoint: in cluster mode each node go-redis
+learned from the cluster's topology (`CLUSTER SLOTS`, the address it dials), in single mode the one address. A
+request is one call on one endpoint's client:
+
+- a redirect (`MOVED`, `ASK`) or a cluster-level retry is a separate request, on the endpoint that answered it;
+- a batch's pipeline is one request per master it touched;
+- the endpoint client's own retries (`redis.max_retries`) are inside one request, backoff included. Cluster mode
+  defaults them to none, so each try is its own request; single mode keeps go-redis's 3;
+- the time includes the wait for a pool connection, and setting up a new connection.
+
+These are not the operations the summary counts, and they never enter it, the interval output or
+`ycsb_latency_seconds`. Connection set-up (`HELLO`, `CLIENT SETINFO`, ...) and the client's own topology reads
+are not counted.
+
+- `ycsb_endpoint_latency_seconds{endpoint,op}`: a histogram on the same 33 fixed bounds as `ycsb_latency_seconds`.
+  `op` is the operation the request belongs to (`READ`, `UPDATE`, `INSERT`, `BATCH_INSERT`, `DELETE`), with a
+  suffix for its outcome: `_ERROR` (failed, client timeouts included), `_REDIRECT` (answered `MOVED`/`ASK`) or
+  `_CANCELED` (ended by the client itself at the run's stop: client closed, context canceled; also a request
+  in flight when go-redis closes the client of a node that left the topology a minute earlier). A pipeline takes its
+  worst outcome: `_ERROR` if any command failed, else `_CANCELED` if the client ended any, else `_REDIRECT`. A missing key is an answer, not an
+  error. Select one exact `op` for percentiles and heatmaps: the outcome series would skew them. With
+  `redis.datatype=json`, reads and updates are MULTI/EXEC transactions, whose redirects and per-command errors
+  go-redis reports only after the request: they are counted as answered.
+- `ycsb_endpoint_errors_total{endpoint,op}` and `ycsb_endpoint_redirects_total{endpoint,op}`: the `_ERROR` and
+  `_REDIRECT` requests' counts, by the plain `op`, present (at zero) for every operation an endpoint has seen.
+  `_CANCELED` requests are in neither.
+- `ycsb_endpoint_info{endpoint,node_id,role,shard}`: cluster mode only, one per node of the last
+  `CLUSTER NODES` reply, read at start, 5s later (a new cluster's gossip can lag), every 30s and after a
+  redirect (at most every 2s; `ycsb_endpoint_info_refreshed_timestamp_seconds` is the last read). Between a
+  failover and the next read the roles are the old ones. `MOVED` and `ASK` are both `_REDIRECT`.
+  `role` is `master`, `replica` or `unknown`, `shard` the
+  master's node ID. A node announcing a hostname is listed under both `hostname:port` and `ip:port`; nodes in a
+  handshake or without an address are left out, and when two lines share an address (a restarted node's
+  failed ghost) the one not flagged `fail` wins. An IPv6 endpoint is `[addr]:port`, as go-redis dials it. go-redis dials a loopback address as the seed's host and a
+  port 0 as the seed's port; such endpoints get no info series. Join on the scrape's labels and `endpoint`, e.g.
+  `... * on(instance, endpoint) group_left(role, shard) ycsb_endpoint_info`, keeping the latency series on the
+  left (the hostname double listing would otherwise double count).
+
+Percentiles come from the fixed buckets (`histogram_quantile(0.99, sum by (le, endpoint)
+(rate(ycsb_endpoint_latency_seconds_bucket{op="READ"}[30s])))`), so their resolution is that of the bounds
+(100µs, 250µs, 500µs, 750µs, 1ms, ...). Series grow with endpoints × operations × outcomes: 30 masters with
+reads and updates are about 2,000 lines per scrape, 60 endpoints with every operation and outcome about 44,000
+(about 5 MB); raise the scrape interval for large clusters. Endpoints past the first 1024 are recorded together under
+`endpoint="other"` and counted in `ycsb_endpoint_overflow_total` (series are never removed, and redirect
+targets and topology changes add endpoints). The `CLUSTER NODES` reads borrow a connection from the client's
+pool, every 30s. Nothing is recorded during a warm-up (a batch follows
+the decision the worker made when it started). A scraper that adds its own `endpoint` target label (a Prometheus
+Operator ServiceMonitor) renames this one to `exported_endpoint`. Other bindings record nothing, and the option
+costs nothing when off.
 
 `TOTAL` repeats successful per-operation samples, and `BATCH_*` measures batch calls; keep these separate from
 record-level operations when aggregating distributions.

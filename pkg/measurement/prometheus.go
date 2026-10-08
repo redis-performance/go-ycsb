@@ -43,6 +43,7 @@ type promConfig struct {
 	linger        time.Duration
 	hdrWindows    bool
 	hdrMinuteFile string
+	endpoints     bool
 }
 
 var promLabelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -100,6 +101,22 @@ func parsePromConfig(p *properties.Properties) (promConfig, error) {
 			return cfg, fmt.Errorf("%s: window is reserved when %s=true", prop.MeasurementPrometheusLabels, prop.MeasurementPrometheusHDRWindows)
 		}
 	}
+	if value, ok := p.Get(prop.MeasurementPrometheusEndpoints); ok {
+		cfg.endpoints, err = strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return cfg, fmt.Errorf("%s=%q: want true or false", prop.MeasurementPrometheusEndpoints, value)
+		}
+	}
+	if cfg.endpoints {
+		if cfg.listen == "" {
+			return cfg, fmt.Errorf("%s needs %s", prop.MeasurementPrometheusEndpoints, prop.MeasurementPrometheusListen)
+		}
+		for _, name := range []string{"endpoint", "node_id", "role", "shard"} {
+			if _, exists := cfg.labels[name]; exists {
+				return cfg, fmt.Errorf("%s: %s is reserved when %s=true", prop.MeasurementPrometheusLabels, name, prop.MeasurementPrometheusEndpoints)
+			}
+		}
+	}
 	cfg.hdrMinuteFile = strings.TrimSpace(p.GetString(prop.MeasurementHDRMinuteOutputFile, ""))
 	if cfg.hdrMinuteFile != "" && !cfg.hdrWindows {
 		return cfg, fmt.Errorf("%s needs %s=true", prop.MeasurementHDRMinuteOutputFile, prop.MeasurementPrometheusHDRWindows)
@@ -153,6 +170,12 @@ type promCollector struct {
 	hdrCoverage  *prometheus.Desc
 	hdrValid     *prometheus.Desc
 	hdrEnd       *prometheus.Desc
+	epLatency    *prometheus.Desc
+	epErrors     *prometheus.Desc
+	epRedirects  *prometheus.Desc
+	epInfo       *prometheus.Desc
+	epOverflow   *prometheus.Desc
+	epInfoAt     *prometheus.Desc
 	infoVals     []string
 	targetValue  float64
 	plannedValue float64
@@ -204,12 +227,21 @@ func newPromCollector(h *histograms, p *properties.Properties) *promCollector {
 		c.hdrValid = desc("ycsb_hdr_window_coverage_valid", "One when all expected HDR slices are present, each lasts 0.5s to 1.5s, total duration is within 0.5s of the target, and no samples were dropped; zero otherwise.", "op", "window")
 		c.hdrEnd = desc("ycsb_hdr_window_end_timestamp_seconds", "End of the last completed HDR window, Unix seconds.", "op", "window")
 	}
+	if endpoints.Load() != nil {
+		c.epLatency = desc("ycsb_endpoint_latency_seconds", "Cumulative latency of the requests sent to one server endpoint, in seconds: one request each (a pipeline is one; the node client's own retries, the pool wait and a new connection's set-up are inside it), not an operation. *_ERROR, *_REDIRECT and *_CANCELED ops are failed, redirected and client-ended requests.", "endpoint", "op")
+		c.epErrors = desc("ycsb_endpoint_errors_total", "Cumulative failed requests to one server endpoint; redirects and requests the client ended (*_CANCELED) excluded.", "endpoint", "op")
+		c.epRedirects = desc("ycsb_endpoint_redirects_total", "Cumulative requests one server endpoint answered with a redirect (MOVED or ASK).", "endpoint", "op")
+		c.epOverflow = desc("ycsb_endpoint_overflow_total", "Endpoints past the first 1024, whose requests are recorded under endpoint=\"other\".")
+		c.epInfoAt = desc("ycsb_endpoint_info_refreshed_timestamp_seconds", "When ycsb_endpoint_info was last read (CLUSTER NODES), Unix seconds; a failed read keeps the previous one.")
+		c.epInfo = desc("ycsb_endpoint_info", "One per endpoint the server reported (CLUSTER NODES): its node ID, role and shard (its master's node ID).", "endpoint", "node_id", "role", "shard")
+	}
 	return c
 }
 
 func (c *promCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{c.info, c.running, c.target, c.planned, c.queueDepth, c.queueCap, c.ops, c.errors, c.latencyHist, c.latency,
-		c.avg, c.max, c.count, c.window, c.end, c.hdrCount, c.hdrDropped, c.hdrLatency, c.hdrCoverage, c.hdrValid, c.hdrEnd} {
+		c.avg, c.max, c.count, c.window, c.end, c.hdrCount, c.hdrDropped, c.hdrLatency, c.hdrCoverage, c.hdrValid, c.hdrEnd,
+		c.epLatency, c.epErrors, c.epRedirects, c.epInfo, c.epOverflow, c.epInfoAt} {
 		if d != nil {
 			ch <- d
 		}
@@ -281,6 +313,8 @@ func (c *promCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstHistogram(c.latencyHist, sample.count, sample.sum, sample.buckets, op)
 	}
 
+	c.collectEndpoints(ch)
+
 	snapshot := c.h.iv.latest.Load()
 	if snapshot == nil {
 		return
@@ -321,6 +355,57 @@ func (c *promCollector) Collect(ch chan<- prometheus.Metric) {
 		}{{"0.5", r.P50Us}, {"0.9", r.P90Us}, {"0.95", r.P95Us}, {"0.99", r.P99Us}, {"0.999", r.P999Us}} {
 			metric(c.hdrLatency, prometheus.GaugeValue, float64(q.value)/1e6, r.Op, window, q.label)
 		}
+	}
+}
+
+func (c *promCollector) collectEndpoints(ch chan<- prometheus.Metric) {
+	s := endpoints.Load()
+	if s == nil || c.epLatency == nil {
+		return
+	}
+	// a series that can't be built is left out rather than failing the scrape
+	emit := func(m prometheus.Metric, err error) {
+		if err == nil {
+			ch <- m
+		}
+	}
+	samples, info, infoAt, overflow := s.snapshot()
+	if !infoAt.IsZero() {
+		emit(prometheus.NewConstMetric(c.epInfoAt, prometheus.GaugeValue, float64(infoAt.UnixNano())/1e9))
+	}
+	emit(prometheus.NewConstMetric(c.epOverflow, prometheus.CounterValue, float64(overflow)))
+	errs := make(map[endpointKey]uint64)
+	redirects := make(map[endpointKey]uint64)
+	for _, sample := range samples {
+		emit(prometheus.NewConstHistogram(c.epLatency, sample.count, sample.sum, sample.buckets, sample.endpoint, sample.op+sample.outcome))
+		// both counters exist for every operation an endpoint has seen, zero
+		// until the first error or redirect
+		k := endpointKey{endpoint: sample.endpoint, op: sample.op}
+		switch sample.outcome {
+		case EndpointError:
+			errs[k] += sample.count
+			redirects[k] += 0
+		case EndpointRedirect:
+			errs[k] += 0
+			redirects[k] += sample.count
+		default:
+			errs[k] += 0
+			redirects[k] += 0
+		}
+	}
+	for k, n := range errs {
+		emit(prometheus.NewConstMetric(c.epErrors, prometheus.CounterValue, float64(n), k.endpoint, k.op))
+	}
+	for k, n := range redirects {
+		emit(prometheus.NewConstMetric(c.epRedirects, prometheus.CounterValue, float64(n), k.endpoint, k.op))
+	}
+	seen := make(map[string]bool, len(info))
+	for _, e := range info {
+		if seen[e.Endpoint] {
+			continue // a registry refuses a duplicate series
+		}
+		seen[e.Endpoint] = true
+		emit(prometheus.NewConstMetric(c.epInfo, prometheus.GaugeValue, 1, e.Endpoint, e.NodeID, e.Role, e.Shard))
 	}
 }
 

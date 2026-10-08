@@ -7,7 +7,8 @@
 # count; the run must report no errors. On the cluster it also checks the
 # defaults that keep go-redis v9.8.0's behaviour on the wire: no COMMAND
 # lookups and no CLIENT MAINT_NOTIFICATIONS reach the nodes, and the nodes
-# replied no errors.
+# replied no errors. A further run on each with the per-endpoint metrics on
+# checks them against the summary and the nodes (check_endpoint_metrics.py).
 #
 # Same script for local dev and CI: it starts (and tears down) its own
 # disposable containers, under names unique to the run. Without docker or
@@ -141,10 +142,66 @@ run_mode() {
   echo "OK: [$mode] no COMMAND, no CLIENT MAINT_NOTIFICATIONS, no error replies"
 }
 
+# run_endpoints <mode> <redis.addr> <container> <ports...>: a run with the
+# per-endpoint metrics on (measurement.prometheus_endpoints), its /metrics
+# scraped once its final counts are in (ycsb_phase_running 0, during the
+# linger), checked against its summary and the nodes (check_endpoint_metrics.py).
+run_endpoints() {
+  local mode=$1 addr=$2 container=$3
+  shift 3
+  local ports=("$@") endpoints=() masters=() port
+  port=$(free_ports 1)
+  for p in "${ports[@]}"; do
+    if [ "$mode" = single ]; then
+      endpoints+=("$addr")
+    else
+      endpoints+=("127.0.0.1:$p")
+      if [ "$(redis_cli "$container" "$p" role | head -n 1)" = master ]; then masters+=("127.0.0.1:$p"); fi
+    fi
+  done
+  echo "==> [$mode] run with per-endpoint metrics ($OPERATIONCOUNT operations)"
+  ./bin/go-ycsb run redis -P workloads/workload_feature_store -p redis.mode="$mode" -p redis.addr="$addr" \
+    -p recordcount="$RECORDCOUNT" -p threadcount="$THREADCOUNT" -p operationcount="$OPERATIONCOUNT" \
+    -p measurement.prometheus_listen="127.0.0.1:$port" -p measurement.prometheus_endpoints=true \
+    -p measurement.prometheus_linger=5s >"$WORK/$mode-endpoints.log" 2>&1 &
+  local pid=$! scraped=
+  for _ in $(seq 1 1200); do
+    # python3, which the tests need anyway, rather than curl
+    if python3 -c 'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=2).read().decode())' \
+      "http://127.0.0.1:$port/metrics" >"$WORK/$mode-endpoints.prom" 2>/dev/null &&
+      grep -qE '^ycsb_phase_running(\{[^}]*\})? 0$' "$WORK/$mode-endpoints.prom"; then
+      scraped=1
+      break
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 0.1
+  done
+  # the stop ends the run (it doesn't shorten the linger); it must still exit 0
+  kill -INT "$pid" 2>/dev/null || true
+  local rc=0
+  wait "$pid" || rc=$?
+  if [ "$rc" != 0 ]; then
+    echo "FAIL: [$mode] go-ycsb exited $rc"
+    cat "$WORK/$mode-endpoints.log"
+    exit 1
+  fi
+  if [ -z "$scraped" ]; then
+    echo "FAIL: [$mode] no final /metrics scrape"
+    cat "$WORK/$mode-endpoints.log"
+    exit 1
+  fi
+  check_phase "$WORK/$mode-endpoints.log" "$mode run with per-endpoint metrics" TOTAL "$OPERATIONCOUNT"
+  python3 test/integration/check_endpoint_metrics.py "$WORK/$mode-endpoints.prom" "$WORK/$mode-endpoints.log" \
+    "$mode" "$(IFS=,; echo "${endpoints[*]}")" "$(IFS=,; echo "${masters[*]:-}")"
+}
+
 # the single Redis listens on 6379 in its container, on $SINGLE_PORT on the host
 run_mode single "127.0.0.1:$SINGLE_PORT" "$SINGLE" 6379
 # the cluster nodes listen on the same ports in the container and on the host
 # shellcheck disable=SC2086 # the ports are a list
 run_mode cluster "$CLUSTER_ADDR" "$CLUSTER" $CLUSTER_PORTS
+run_endpoints single "127.0.0.1:$SINGLE_PORT" "$SINGLE" 6379
+# shellcheck disable=SC2086 # the ports are a list
+run_endpoints cluster "$CLUSTER_ADDR" "$CLUSTER" $CLUSTER_PORTS
 
 echo "==> redis integration test passed"

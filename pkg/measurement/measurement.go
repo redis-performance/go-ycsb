@@ -131,6 +131,7 @@ func InitMeasure(p *properties.Properties) {
 	if err != nil {
 		util.Fatalf("%v", err)
 	}
+	endpoints.Store(nil)
 	measureChan = make(chan measureEvent, 1000000) // tune size if needed
 	switch measurementType {
 	case "histogram":
@@ -153,6 +154,9 @@ func InitMeasure(p *properties.Properties) {
 						util.Fatalf("%v", err)
 					}
 				}
+			}
+			if promConfig.endpoints {
+				endpoints.Store(newEndpointStats())
 			}
 			if err := startPrometheus(promConfig, h, p); err != nil {
 				util.Fatalf("%v", err)

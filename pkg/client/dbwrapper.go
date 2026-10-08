@@ -102,23 +102,19 @@ func batchOutcome(err error, n int) (failed, notRun int) {
 // measureN records the samples (a variable for the tests).
 var measureN = measurement.MeasureN
 
-type batchMeasuredKey struct{}
-
 // withBatchMeasured marks a batch's context with whether its records are
 // measured: the worker decides it once, when the batch starts, and counts the
 // batch's operations accordingly, so a warm-up that ends while the batch runs
-// can't leave some of its records measured and the rest not.
+// can't leave some of its records measured and the rest not (the DB's
+// per-endpoint requests follow the same mark).
 func withBatchMeasured(ctx context.Context, measured bool) context.Context {
-	return context.WithValue(ctx, batchMeasuredKey{}, measured)
+	return measurement.WithMeasured(ctx, measured)
 }
 
 // batchMeasured says whether a batch's records are measured: as the worker
 // decided, or, for a batch it didn't start, whether the warm-up is over.
 func batchMeasured(ctx context.Context) bool {
-	if measured, ok := ctx.Value(batchMeasuredKey{}).(bool); ok {
-		return measured
-	}
-	return measurement.IsWarmUpFinished()
+	return measurement.Measured(ctx)
 }
 
 // eachRecord runs op on every record of a batch, on its own, for a DB without

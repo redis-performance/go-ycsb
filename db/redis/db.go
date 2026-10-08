@@ -13,6 +13,7 @@ import (
 	json "github.com/segmentio/encoding/json"
 
 	"github.com/magiconair/properties"
+	"github.com/pingcap/go-ycsb/pkg/measurement"
 	"github.com/pingcap/go-ycsb/pkg/prop"
 	"github.com/pingcap/go-ycsb/pkg/util"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
@@ -46,6 +47,9 @@ type redis struct {
 	mode       string
 	datatype   string
 	fieldcount int64
+	// endpoints: requests are timed per endpoint (measurement.prometheus_endpoints)
+	endpoints     bool
+	stopEndpoints chan struct{} // ends the CLUSTER NODES refresh
 
 	mu     sync.Mutex                   // guards runs and closed
 	runs   map[<-chan struct{}]*runStop // the stops of the runs with threads
@@ -54,6 +58,10 @@ type redis struct {
 
 func (r *redis) Close() error {
 	r.mu.Lock()
+	if r.stopEndpoints != nil {
+		close(r.stopEndpoints)
+		r.stopEndpoints = nil
+	}
 	for key, s := range r.runs {
 		s.retire()
 		delete(r.runs, key)
@@ -206,6 +214,10 @@ func (r *redis) endGrace(s *runStop) {
 	time.AfterFunc(closeToCancel, s.cancel)
 	closed := r.closed // by another run's grace: this run's waits still end
 	r.closed = true
+	if r.stopEndpoints != nil { // the client it reads CLUSTER NODES with is closing
+		close(r.stopEndpoints)
+		r.stopEndpoints = nil
+	}
 	r.mu.Unlock()
 	if !closed {
 		r.client.Close()
@@ -216,6 +228,7 @@ func (r *redis) Read(ctx context.Context, table string, key string, fields []str
 	if ctx, err = started(ctx); err != nil {
 		return nil, err
 	}
+	ctx = r.withEndpointOp(ctx, opRead)
 	data = make(map[string][]byte, len(fields))
 	switch r.datatype {
 	case JSON_DATATYPE:
@@ -302,6 +315,7 @@ func (r *redis) Update(ctx context.Context, table string, key string, values map
 	if ctx, err = started(ctx); err != nil {
 		return err
 	}
+	ctx = r.withEndpointOp(ctx, opUpdate)
 	// check if it's full update. If yes then we can avoid reading the previous value on string datype
 	fullUpdate := false
 	if int64(len(values)) == r.fieldcount {
@@ -428,6 +442,7 @@ func (r *redis) Insert(ctx context.Context, table string, key string, values map
 	if err != nil {
 		return err
 	}
+	ctx = r.withEndpointOp(ctx, opInsert)
 	cmd, err := r.insert(ctx, r.client, table, key, values)
 	if err != nil {
 		return err
@@ -449,6 +464,7 @@ func (r *redis) BatchInsert(ctx context.Context, table string, keys []string, va
 		}
 		return ycsb.NewBatchError(errs)
 	}
+	ctx = r.withEndpointOp(ctx, opBatchInsert)
 	cmds := make([]goredis.Cmder, len(keys))
 	pipe := r.client.Pipeline()
 	for i, key := range keys {
@@ -482,6 +498,7 @@ func (r *redis) Delete(ctx context.Context, table string, key string) error {
 	if err != nil {
 		return err
 	}
+	ctx = r.withEndpointOp(ctx, opDelete)
 	return r.client.Del(ctx, getKeyName(table, key)).Err()
 }
 
@@ -557,7 +574,7 @@ func started(ctx context.Context) (context.Context, error) {
 type redisCreator struct{}
 
 func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
-	rds := &redis{}
+	rds := &redis{endpoints: measurement.EndpointsEnabled()}
 
 	mode := p.GetString(redisMode, redisModeDefault)
 	switch mode {
@@ -585,12 +602,19 @@ func (r redisCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 			}
 		}
 		rds.client = clusterClient
+		if rds.endpoints {
+			rds.stopEndpoints = make(chan struct{})
+			refreshEndpointInfo(clusterClient, rds.stopEndpoints)
+		}
 	case "single":
 		singleOpts, err := getOptionsSingle(p)
 		if err != nil {
 			return nil, err
 		}
 		singleEndpointClient := goredis.NewClient(singleOpts)
+		if rds.endpoints {
+			singleEndpointClient.AddHook(newEndpointHook(singleOpts.Addr))
+		}
 		err = singleEndpointClient.Ping(context.Background()).Err()
 		if err != nil {
 			singleEndpointClient.Close()
@@ -861,7 +885,11 @@ func newClusterNodeClient(opt *goredis.Options) *goredis.Client {
 	if opt.ReadTimeout == 0 {
 		opt.ReadTimeout = redisReadTimeoutDefault
 	}
-	return goredis.NewClient(opt)
+	c := goredis.NewClient(opt)
+	if measurement.EndpointsEnabled() {
+		c.AddHook(newEndpointHook(opt.Addr))
+	}
+	return c
 }
 
 func getOptionsSingle(p *properties.Properties) (*goredis.Options, error) {
