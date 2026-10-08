@@ -1,3 +1,13 @@
 .git
 LICENSE
 PATENTS
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+**/*.pem
+**/*.key
+demo/*.png
+demo/captures/

@@ -33,6 +33,7 @@ func TestParsePromConfig(t *testing.T) {
 		wantErr              bool
 	}{
 		{"valid", "phase=load,custom_label=a=b", "250ms", false},
+		{"legacy window label", "window=trial", "", false},
 		{"empty entry", "phase=load,", "", true},
 		{"missing equals", "phase", "", true},
 		{"empty value", "phase=", "", true},
@@ -65,6 +66,42 @@ func TestParsePromConfig(t *testing.T) {
 				t.Errorf("config = %+v", cfg)
 			}
 		})
+	}
+}
+
+func TestParsePromConfigHDRWindows(t *testing.T) {
+	for _, tc := range []struct {
+		name, listen, enabled, minute string
+		wantErr                       bool
+	}{
+		{"enabled", "127.0.0.1:9464", "true", "minutes.jsonl", false},
+		{"bad bool", "127.0.0.1:9464", "yes please", "", true},
+		{"no exporter", "", "true", "", true},
+		{"file without HDR", "127.0.0.1:9464", "false", "minutes.jsonl", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := properties.NewProperties()
+			p.Set(prop.MeasurementPrometheusListen, tc.listen)
+			p.Set(prop.MeasurementPrometheusHDRWindows, tc.enabled)
+			p.Set(prop.MeasurementHDRMinuteOutputFile, tc.minute)
+			cfg, err := parsePromConfig(p)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parsePromConfig() = %+v, %v; wantErr %t", cfg, err, tc.wantErr)
+			}
+			if err == nil && (!cfg.hdrWindows || cfg.hdrMinuteFile != tc.minute) {
+				t.Errorf("HDR config = %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestPackedWindowRejectsConflictingConstantLabel(t *testing.T) {
+	p := properties.NewProperties()
+	p.Set(prop.MeasurementPrometheusListen, "127.0.0.1:9464")
+	p.Set(prop.MeasurementPrometheusHDRWindows, "true")
+	p.Set(prop.MeasurementPrometheusLabels, "window=trial")
+	if _, err := parsePromConfig(p); err == nil {
+		t.Fatal("packed window label conflict was accepted")
 	}
 }
 
@@ -107,6 +144,10 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	p.Set(prop.Workload, "core")
 	p.Set(prop.Command, "load")
 	p.Set(prop.ThreadCount, "4")
+	p.Set(prop.Target, "80")
+	p.Set(prop.RecordCount, "100")
+	p.Set(prop.InsertStart, "10")
+	p.Set(prop.InsertCount, "90")
 	h := InitHistograms(p)
 	h.windows = true
 	h.prometheus = true
@@ -120,6 +161,10 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 	h.writeInterval(start.Add(time.Second))
 
 	c := newPromCollector(h, p)
+	queue := make(chan measureEvent, 4)
+	queue <- measureEvent{}
+	queue <- measureEvent{}
+	c.queue = queue
 	c.phaseRunning.Store(1)
 	e := &promExporter{collector: c}
 	handler, err := e.handler(prometheus.Labels{"phase": "load"})
@@ -160,6 +205,10 @@ func TestPrometheusScrapeUsesCompletedWindowAndFinalCounts(t *testing.T) {
 		"ycsb_interval_window_seconds{":             1,
 		"ycsb_interval_end_timestamp_seconds{":      1001,
 		"ycsb_phase_running{":                       1,
+		"ycsb_target_operations_per_second{":        80,
+		"ycsb_planned_inserts{":                     90,
+		"ycsb_measurement_queue_depth{":             2,
+		"ycsb_measurement_queue_capacity{":          4,
 	} {
 		if got := metricValue(t, body, prefix); got != want {
 			t.Errorf("%s = %v, want %v", prefix, got, want)

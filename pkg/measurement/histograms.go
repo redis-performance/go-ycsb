@@ -27,6 +27,8 @@ type histograms struct {
 	windows bool
 	// prometheus adds fixed cumulative latency buckets only for exported runs.
 	prometheus bool
+	// packedWindows keeps the last 60 completed one-second HDR intervals.
+	packedWindows bool
 	// cut makes an interval cut atomic across operations: recording holds it
 	// shared, a cut holds it exclusively while it takes every window (only with
 	// windows).
@@ -83,6 +85,9 @@ func (h *histograms) MeasureN(op string, start time.Time, lan time.Duration, n i
 			opM = newHistogram(h.windows)
 			if h.prometheus {
 				opM.promBuckets = make([]uint64, len(promLatencyBucketsUs))
+			}
+			if h.packedWindows {
+				opM.roll = newPackedRoll()
 			}
 			h.histograms[op] = opM
 		}
@@ -152,6 +157,11 @@ func (h *histograms) IntervalTick(now time.Time) { h.writeInterval(now) }
 // IntervalClose writes the last (partial) interval and closes the file. It
 // returns the first error the interval output file hit.
 func (h *histograms) IntervalClose(now time.Time) error {
-	h.writeInterval(now)
-	return h.closeIntervals()
+	h.writeIntervalAt(now, true)
+	intervalErr := h.closeIntervals()
+	minuteErr := h.closeHDRMinutes()
+	if intervalErr != nil {
+		return intervalErr
+	}
+	return minuteErr
 }
